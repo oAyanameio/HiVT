@@ -19,6 +19,14 @@ from torch_geometric.data import Data
 
 
 class TemporalData(Data):
+    """HiVT 使用的时空图数据容器。
+
+    相比普通 `torch_geometric.data.Data`，这里额外封装了：
+    - 多时刻 actor 轨迹
+    - lane 几何与语义属性
+    - lane->actor 关系图
+    - 旋转归一化所需的朝向信息
+    """
 
     def __init__(self,
                  x: Optional[torch.Tensor] = None,
@@ -38,6 +46,27 @@ class TemporalData(Data):
                  lane_actor_vectors: Optional[torch.Tensor] = None,
                  seq_id: Optional[int] = None,
                  **kwargs) -> None:
+        """初始化时空图数据。
+
+        Args:
+            x: actor 历史输入特征，通常是相对位移序列。
+            positions: actor 在完整时域上的位置序列。
+            edge_index: actor-actor 完全图或候选图边索引。
+            edge_attrs: 可选的逐时刻边特征列表。
+            y: 未来监督轨迹。
+            num_nodes: 当前场景中的 actor 数。
+            padding_mask: 时序 padding mask，True 表示该 actor 在对应时刻无效。
+            bos_mask: beginning-of-sequence mask，标记有效轨迹片段起点。
+            rotate_angles: 每个 actor 的局部朝向角。
+            lane_vectors: lane polyline 被拆分后的向量集合。
+            is_intersections: 每个 lane 向量是否位于路口。
+            turn_directions: 每个 lane 向量对应的转向语义。
+            traffic_controls: 每个 lane 向量对应的交通控制语义。
+            lane_actor_index: lane->actor 二分图边索引。
+            lane_actor_vectors: lane 到 actor 的相对位移向量。
+            seq_id: 场景序列编号。
+            **kwargs: 额外字段，透传给 `Data`。
+        """
         if x is None:
             super(TemporalData, self).__init__()
             return
@@ -52,6 +81,15 @@ class TemporalData(Data):
                 self[f'edge_attr_{t}'] = edge_attrs[t]
 
     def __inc__(self, key, value):
+        """定义 batch 拼接时索引字段的自增规则。
+
+        Args:
+            key: 当前字段名。
+            value: 当前字段值。
+
+        Returns:
+            对应字段在 batch 内拼接时需要加上的偏移量。
+        """
         if key == 'lane_actor_index':
             return torch.tensor([[self['lane_vectors'].size(0)], [self.num_nodes]])
         else:
@@ -59,13 +97,31 @@ class TemporalData(Data):
 
 
 class DistanceDropEdge(object):
+    """按欧氏距离裁剪边。
+
+    论文中的局部区域建模只保留半径内的交互关系，这个工具类负责执行该裁剪。
+    """
 
     def __init__(self, max_distance: Optional[float] = None) -> None:
+        """初始化距离裁边器。
+
+        Args:
+            max_distance: 最大保留距离；若为 `None` 则不裁边。
+        """
         self.max_distance = max_distance
 
     def __call__(self,
                  edge_index: torch.Tensor,
                  edge_attr: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """过滤掉过远的边。
+
+        Args:
+            edge_index: 边索引。
+            edge_attr: 边特征，这里假定其可以用 L2 范数表示空间距离。
+
+        Returns:
+            裁剪后的 `(edge_index, edge_attr)`。
+        """
         if self.max_distance is None:
             return edge_index, edge_attr
         row, col = edge_index
@@ -76,6 +132,11 @@ class DistanceDropEdge(object):
 
 
 def init_weights(m: nn.Module) -> None:
+    """统一的参数初始化函数。
+
+    Args:
+        m: 当前待初始化的模块实例。
+    """
     if isinstance(m, nn.Linear):
         nn.init.xavier_uniform_(m.weight)
         if m.bias is not None:

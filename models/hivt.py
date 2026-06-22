@@ -28,6 +28,13 @@ from utils import TemporalData
 
 
 class HiVT(pl.LightningModule):
+    """HiVT 主模型。
+
+    论文对应关系：
+    1. `LocalEncoder` 对应局部时空编码部分，用于抽取 actor 的局部历史交互特征。
+    2. `GlobalInteractor` 对应全局交互模块，用于建模 agent 级别的全局关系。
+    3. `MLPDecoder` 对应多模态轨迹解码头，输出 K 条未来轨迹及其概率。
+    """
 
     def __init__(self,
                  historical_steps: int,
@@ -47,6 +54,27 @@ class HiVT(pl.LightningModule):
                  weight_decay: float,
                  T_max: int,
                  **kwargs) -> None:
+        """初始化 HiVT。
+
+        Args:
+            historical_steps: 历史轨迹长度 T_h，论文与数据处理中默认使用 20 帧历史。
+            future_steps: 未来预测长度 T_f，默认预测 30 帧。
+            num_modes: 多模态预测条数 K，即每个 actor 预测多少条候选未来轨迹。
+            rotate: 是否将坐标旋转到各 actor 的局部朝向坐标系中。
+            node_dim: actor 节点输入维度；本仓库中通常是二维位移/位置特征。
+            edge_dim: 边特征维度；这里主要是相对位移向量的维度。
+            embed_dim: 隐表示维度 D，也是 HiVT-64/128 中的 64/128。
+            num_heads: 多头注意力头数。
+            dropout: dropout 比例。
+            num_temporal_layers: 时间编码器的 Transformer 层数。
+            num_global_layers: 全局交互模块的层数。
+            local_radius: 局部交互与 lane-actor 建边时使用的距离阈值。
+            parallel: 是否并行计算每个历史时刻的 actor-actor 编码。
+            lr: AdamW 学习率。
+            weight_decay: AdamW 权重衰减。
+            T_max: 余弦退火学习率的周期。
+            **kwargs: 预留给 Lightning / argparse 的额外参数。
+        """
         super(HiVT, self).__init__()
         self.save_hyperparameters()
         self.historical_steps = historical_steps
@@ -88,6 +116,20 @@ class HiVT(pl.LightningModule):
         self.minMR = MR()
 
     def forward(self, data: TemporalData):
+        """前向传播。
+
+        Args:
+            data: 单个 batch 的时空图数据，包含历史轨迹、lane 特征、图结构等。
+
+        Returns:
+            y_hat: 形状为 [F, N, H, 4] 或 [F, N, H, 2] 的多模态预测结果。
+                - F: 模态数 `num_modes`
+                - N: batch 中所有 actor 节点数
+                - H: `future_steps`
+                - 最后一维前 2 项是位置均值，后 2 项是 Laplace 分布尺度
+            pi: 形状为 [N, F] 的每个 actor 的模态概率 logits。
+        """
+        # 论文中会将坐标系旋转到目标 actor 的局部朝向坐标系，以减轻朝向变化带来的学习难度。
         if self.rotate:
             rotate_mat = torch.empty(data.num_nodes, 2, 2, device=self.device)
             sin_vals = torch.sin(data['rotate_angles'])
@@ -108,14 +150,25 @@ class HiVT(pl.LightningModule):
         return y_hat, pi
 
     def training_step(self, data, batch_idx):
+        """单个训练 step。
+
+        Args:
+            data: 当前 batch 的图数据。
+            batch_idx: Lightning 传入的 batch 索引。
+
+        Returns:
+            总训练损失 = 轨迹回归损失 + 模态分类损失。
+        """
         y_hat, pi = self(data)
         reg_mask = ~data['padding_mask'][:, self.historical_steps:]
         valid_steps = reg_mask.sum(dim=-1)
         cls_mask = valid_steps > 0
+        # 以每个 actor 的最优模态作为回归监督目标，对应论文中的 best-of-K 训练思路。
         l2_norm = (torch.norm(y_hat[:, :, :, : 2] - data.y, p=2, dim=-1) * reg_mask).sum(dim=-1)  # [F, N]
         best_mode = l2_norm.argmin(dim=0)
         y_hat_best = y_hat[best_mode, torch.arange(data.num_nodes)]
         reg_loss = self.reg_loss(y_hat_best[reg_mask], data.y[reg_mask])
+        # 分类分支不使用硬 one-hot，而是用基于轨迹误差构造的 soft target。
         soft_target = F.softmax(-l2_norm[:, cls_mask] / valid_steps[cls_mask], dim=0).t().detach()
         cls_loss = self.cls_loss(pi[cls_mask], soft_target)
         loss = reg_loss + cls_loss
@@ -123,6 +176,12 @@ class HiVT(pl.LightningModule):
         return loss
 
     def validation_step(self, data, batch_idx):
+        """单个验证 step。
+
+        Args:
+            data: 当前 batch 的图数据。
+            batch_idx: Lightning 传入的 batch 索引。
+        """
         y_hat, pi = self(data)
         reg_mask = ~data['padding_mask'][:, self.historical_steps:]
         l2_norm = (torch.norm(y_hat[:, :, :, : 2] - data.y, p=2, dim=-1) * reg_mask).sum(dim=-1)  # [F, N]
@@ -131,6 +190,7 @@ class HiVT(pl.LightningModule):
         reg_loss = self.reg_loss(y_hat_best[reg_mask], data.y[reg_mask])
         self.log('val_reg_loss', reg_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
 
+        # 论文和 README 中汇报的是 agent 目标车辆上的 minADE / minFDE / MR 指标。
         y_hat_agent = y_hat[:, data['agent_index'], :, : 2]
         y_agent = data.y[data['agent_index']]
         fde_agent = torch.norm(y_hat_agent[:, :, -1] - y_agent[:, -1], p=2, dim=-1)
@@ -144,10 +204,16 @@ class HiVT(pl.LightningModule):
         self.log('val_minMR', self.minMR, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
 
     def configure_optimizers(self):
+        """配置优化器与学习率调度器。
+
+        Returns:
+            Lightning 期望格式的 `[optimizer], [scheduler]`。
+        """
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.MultiheadAttention, nn.LSTM, nn.GRU)
         blacklist_weight_modules = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.LayerNorm, nn.Embedding)
+        # 按参数类型拆分 weight decay，避免对 bias / LayerNorm / Embedding 施加衰减。
         for module_name, module in self.named_modules():
             for param_name, param in module.named_parameters():
                 full_param_name = '%s.%s' % (module_name, param_name) if module_name else param_name
@@ -179,7 +245,16 @@ class HiVT(pl.LightningModule):
 
     @staticmethod
     def add_model_specific_args(parent_parser):
+        """向命令行解析器注册 HiVT 专属参数。
+
+        Args:
+            parent_parser: 外部传入的 `ArgumentParser`。
+
+        Returns:
+            注册完参数后的原 parser。
+        """
         parser = parent_parser.add_argument_group('HiVT')
+        # 这些默认值与论文公开代码保持一致。
         parser.add_argument('--historical_steps', type=int, default=20)
         parser.add_argument('--future_steps', type=int, default=30)
         parser.add_argument('--num_modes', type=int, default=6)

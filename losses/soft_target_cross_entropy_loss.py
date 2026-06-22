@@ -17,14 +17,33 @@ import torch.nn.functional as F
 
 
 class SoftTargetCrossEntropyLoss(nn.Module):
+    """支持 soft label 的交叉熵损失。
+
+    HiVT 训练时并不直接用 one-hot 模态标签，而是根据各模态轨迹误差
+    构造 soft target，因此这里需要一个 soft-label cross entropy。
+    """
 
     def __init__(self, reduction: str = 'mean') -> None:
+        """初始化 soft target 交叉熵。
+
+        Args:
+            reduction: 聚合方式，可选 `mean` / `sum` / `none`。
+        """
         super(SoftTargetCrossEntropyLoss, self).__init__()
         self.reduction = reduction
 
     def forward(self,
                 pred: torch.Tensor,
                 target: torch.Tensor) -> torch.Tensor:
+        """计算 soft-label cross entropy。
+
+        Args:
+            pred: 预测 logits。
+            target: soft target 概率分布，最后一维需与 `pred` 对齐。
+
+        Returns:
+            按 `reduction` 聚合后的损失值。
+        """
         cross_entropy = torch.sum(-target * F.log_softmax(pred, dim=-1), dim=-1)
         if self.reduction == 'mean':
             return cross_entropy.mean()

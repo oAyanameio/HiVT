@@ -18,12 +18,24 @@ from torchmetrics import Metric
 
 
 class ADE(Metric):
+    """Average Displacement Error.
+
+    对应论文和 README 中汇报的 minADE 指标的基础误差定义。
+    """
 
     def __init__(self,
                  compute_on_step: bool = True,
                  dist_sync_on_step: bool = False,
                  process_group: Optional[Any] = None,
                  dist_sync_fn: Callable = None) -> None:
+        """初始化 ADE 累积器。
+
+        Args:
+            compute_on_step: 是否在 step 级别计算。
+            dist_sync_on_step: 分布式下是否在 step 同步。
+            process_group: 分布式通信组。
+            dist_sync_fn: 自定义分布式同步函数。
+        """
         super(ADE, self).__init__(compute_on_step=compute_on_step, dist_sync_on_step=dist_sync_on_step,
                                   process_group=process_group, dist_sync_fn=dist_sync_fn)
         self.add_state('sum', default=torch.tensor(0.0), dist_reduce_fx='sum')
@@ -32,8 +44,15 @@ class ADE(Metric):
     def update(self,
                pred: torch.Tensor,
                target: torch.Tensor) -> None:
+        """累积一个 batch 的 ADE。
+
+        Args:
+            pred: 预测轨迹，[N, H, 2]。
+            target: 真实轨迹，[N, H, 2]。
+        """
         self.sum += torch.norm(pred - target, p=2, dim=-1).mean(dim=-1).sum()
         self.count += pred.size(0)
 
     def compute(self) -> torch.Tensor:
+        """返回当前累计的平均 ADE。"""
         return self.sum / self.count

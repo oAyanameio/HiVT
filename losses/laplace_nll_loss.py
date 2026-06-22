@@ -16,10 +16,21 @@ import torch.nn as nn
 
 
 class LaplaceNLLLoss(nn.Module):
+    """Laplace 负对数似然损失。
+
+    HiVT 的解码器会同时预测未来位置的均值 `loc` 与尺度 `scale`，
+    因而这里使用 Laplace 分布的 NLL 作为轨迹回归目标。
+    """
 
     def __init__(self,
                  eps: float = 1e-6,
                  reduction: str = 'mean') -> None:
+        """初始化 Laplace NLL 损失。
+
+        Args:
+            eps: 尺度的数值稳定下界。
+            reduction: 聚合方式，可选 `mean` / `sum` / `none`。
+        """
         super(LaplaceNLLLoss, self).__init__()
         self.eps = eps
         self.reduction = reduction
@@ -27,6 +38,15 @@ class LaplaceNLLLoss(nn.Module):
     def forward(self,
                 pred: torch.Tensor,
                 target: torch.Tensor) -> torch.Tensor:
+        """计算 Laplace NLL。
+
+        Args:
+            pred: 预测张量，最后一维需包含 `(loc, scale)` 两部分。
+            target: 真实目标位置。
+
+        Returns:
+            按 `reduction` 聚合后的损失值。
+        """
         loc, scale = pred.chunk(2, dim=-1)
         scale = scale.clone()
         with torch.no_grad():

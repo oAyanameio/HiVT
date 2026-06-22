@@ -21,6 +21,10 @@ from utils import init_weights
 
 
 class GRUDecoder(nn.Module):
+    """基于 GRU 的多模态解码器。
+
+    论文默认实验使用的是 `MLPDecoder`，这里保留了一个时序递归版本的替代实现。
+    """
 
     def __init__(self,
                  local_channels: int,
@@ -29,6 +33,16 @@ class GRUDecoder(nn.Module):
                  num_modes: int,
                  uncertain: bool = True,
                  min_scale: float = 1e-3) -> None:
+        """初始化 GRU 解码器。
+
+        Args:
+            local_channels: 局部编码维度，作为 GRU 初始隐状态维度。
+            global_channels: 全局模态表示维度，作为 GRU 输入维度。
+            future_steps: 未来预测步数。
+            num_modes: 预测模态数。
+            uncertain: 是否同时预测位置分布尺度。
+            min_scale: 分布尺度下界，避免数值不稳定。
+        """
         super(GRUDecoder, self).__init__()
         self.input_size = global_channels
         self.hidden_size = local_channels
@@ -68,6 +82,17 @@ class GRUDecoder(nn.Module):
     def forward(self,
                 local_embed: torch.Tensor,
                 global_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """解码未来轨迹。
+
+        Args:
+            local_embed: 局部表示，[N, D_l]。
+            global_embed: 全局多模态表示，[F, N, D_g]。
+
+        Returns:
+            一个二元组 `(traj, pi)`：
+            - `traj`: [F, N, H, 4] 或 [F, N, H, 2]
+            - `pi`: [N, F]，模态 logits
+        """
         pi = self.pi(torch.cat((local_embed.expand(self.num_modes, *local_embed.shape),
                                 global_embed), dim=-1)).squeeze(-1).t()
         global_embed = global_embed.reshape(-1, self.input_size)  # [F x N, D]
@@ -85,6 +110,11 @@ class GRUDecoder(nn.Module):
 
 
 class MLPDecoder(nn.Module):
+    """论文默认使用的 MLP 多模态解码器。
+
+    该解码器将局部表示与全局模态表示拼接后，直接回归整段未来轨迹，
+    同时预测每个模态的置信度 logits。
+    """
 
     def __init__(self,
                  local_channels: int,
@@ -93,6 +123,16 @@ class MLPDecoder(nn.Module):
                  num_modes: int,
                  uncertain: bool = True,
                  min_scale: float = 1e-3) -> None:
+        """初始化 MLP 解码器。
+
+        Args:
+            local_channels: 局部表示维度。
+            global_channels: 全局模态表示维度。
+            future_steps: 未来预测步数。
+            num_modes: 预测模态数。
+            uncertain: 是否输出 Laplace 分布尺度。
+            min_scale: 尺度的最小正偏移量，防止 scale 为 0。
+        """
         super(MLPDecoder, self).__init__()
         self.input_size = global_channels
         self.hidden_size = local_channels
@@ -129,6 +169,19 @@ class MLPDecoder(nn.Module):
     def forward(self,
                 local_embed: torch.Tensor,
                 global_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """解码未来多模态轨迹。
+
+        Args:
+            local_embed: 局部 actor 表示，[N, D_l]。
+            global_embed: 全局模态表示，[F, N, D_g]。
+
+        Returns:
+            一个二元组 `(traj, pi)`：
+            - `traj`: 若 `uncertain=True`，则为 [F, N, H, 4]，
+              最后一维为 `(mu_x, mu_y, b_x, b_y)`；
+              否则为 [F, N, H, 2]
+            - `pi`: [N, F]，每个 actor 对应各模态的 logits
+        """
         pi = self.pi(torch.cat((local_embed.expand(self.num_modes, *local_embed.shape),
                                 global_embed), dim=-1)).squeeze(-1).t()
         out = self.aggr_embed(torch.cat((global_embed, local_embed.expand(self.num_modes, *local_embed.shape)), dim=-1))
