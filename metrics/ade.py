@@ -23,6 +23,8 @@ class ADE(Metric):
     对应论文和 README 中汇报的 minADE 指标的基础误差定义。
     """
 
+    full_state_update = False
+
     def __init__(self,
                  compute_on_step: bool = True,
                  dist_sync_on_step: bool = False,

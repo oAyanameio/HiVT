@@ -44,6 +44,11 @@ To train HiVT-64:
 python train.py --root /path/to/dataset_root/ --embed_dim 64
 ```
 
+To train the reliability-augmented HiVT-64:
+```
+python train.py --root /path/to/dataset_root/ --embed_dim 64 --use_reliability true
+```
+
 To train HiVT-128:
 ```
 python train.py --root /path/to/dataset_root/ --embed_dim 128
@@ -101,4 +106,3 @@ If you found this repository useful, please consider citing our work:
 ## License
 
 This repository is licensed under [Apache 2.0](LICENSE).
-

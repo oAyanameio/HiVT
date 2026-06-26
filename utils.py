@@ -18,6 +18,22 @@ import torch.nn as nn
 from torch_geometric.data import Data
 
 
+def extract_lightning_batch_size(batch) -> int:
+    """为 Lightning 提供稳定的 batch size 推断。
+
+    PyG 的 `Batch` 会暴露大量不同 shape 的字段，Lightning 1.5 递归扫描这些字段时
+    容易把它误判成“ambiguous collection”。对 HiVT 来说，更合理的 batch size 是
+    场景数 `num_graphs`；单样本场景则退化为 1。
+    """
+    num_graphs = getattr(batch, 'num_graphs', None)
+    if num_graphs is not None:
+        return int(num_graphs)
+    batch_index = getattr(batch, 'batch', None)
+    if batch_index is not None and batch_index.numel() > 0:
+        return int(batch_index[-1].item()) + 1
+    return 1
+
+
 class TemporalData(Data):
     """HiVT 使用的时空图数据容器。
 
@@ -80,7 +96,7 @@ class TemporalData(Data):
             for t in range(self.x.size(1)):
                 self[f'edge_attr_{t}'] = edge_attrs[t]
 
-    def __inc__(self, key, value):
+    def __inc__(self, key, value, *args, **kwargs):
         """定义 batch 拼接时索引字段的自增规则。
 
         Args:
@@ -93,7 +109,7 @@ class TemporalData(Data):
         if key == 'lane_actor_index':
             return torch.tensor([[self['lane_vectors'].size(0)], [self.num_nodes]])
         else:
-            return super().__inc__(key, value)
+            return super().__inc__(key, value, *args, **kwargs)
 
 
 class DistanceDropEdge(object):

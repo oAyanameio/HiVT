@@ -330,7 +330,7 @@ class TemporalEncoder(nn.Module):
         super(TemporalEncoder, self).__init__()
         encoder_layer = TemporalEncoderLayer(embed_dim=embed_dim, num_heads=num_heads, dropout=dropout)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=num_layers,
-                                                         norm=nn.LayerNorm(embed_dim))
+                                                         norm=nn.LayerNorm(embed_dim), enable_nested_tensor=False)
         self.padding_token = nn.Parameter(torch.Tensor(historical_steps, 1, embed_dim))
         self.cls_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.Tensor(historical_steps + 1, 1, embed_dim))
@@ -402,13 +402,15 @@ class TemporalEncoderLayer(nn.Module):
     def forward(self,
                 src: torch.Tensor,
                 src_mask: Optional[torch.Tensor] = None,
-                src_key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+                src_key_padding_mask: Optional[torch.Tensor] = None,
+                is_causal: Optional[bool] = None) -> torch.Tensor:
         """执行一层 pre-norm Transformer。
 
         Args:
             src: 输入序列，形状为 [T, N, D]。
             src_mask: 时间维注意力 mask。
             src_key_padding_mask: key 的 padding mask。
+            is_causal: PyTorch 2.x `TransformerEncoder` 传入的因果标志，这里沿用显式 `src_mask`。
 
         Returns:
             更新后的序列表示。

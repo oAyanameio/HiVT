@@ -27,6 +27,22 @@ from tqdm import tqdm
 from utils import TemporalData
 
 
+def _ensure_temporal_edge_keys(data: TemporalData, historical_steps: int = 20) -> TemporalData:
+    """统一补齐 `edge_index_t` / `edge_attr_t` 键，避免 PyG collate 因键集不一致报错。"""
+    if data.x is None:
+        return data
+    empty_edge_index = data.edge_index.new_empty((2, 0))
+    empty_edge_attr = data.x.new_empty((0, data.x.size(-1)))
+    for t in range(historical_steps):
+        edge_index_key = f'edge_index_{t}'
+        edge_attr_key = f'edge_attr_{t}'
+        if edge_index_key not in data:
+            data[edge_index_key] = empty_edge_index
+        if edge_attr_key not in data:
+            data[edge_attr_key] = empty_edge_attr
+    return data
+
+
 class ArgoverseV1Dataset(Dataset):
 
     def __init__(self,
@@ -51,6 +67,7 @@ class ArgoverseV1Dataset(Dataset):
         self._raw_file_names = os.listdir(self.raw_dir)
         self._processed_file_names = [os.path.splitext(f)[0] + '.pt' for f in self.raw_file_names]
         self._processed_paths = [os.path.join(self.processed_dir, f) for f in self._processed_file_names]
+        self._map_api: Optional[ArgoverseMap] = None
         super(ArgoverseV1Dataset, self).__init__(root, transform=transform)
 
     @property
@@ -84,7 +101,60 @@ class ArgoverseV1Dataset(Dataset):
         return len(self._raw_file_names)
 
     def get(self, idx) -> Data:
-        return torch.load(self.processed_paths[idx])
+        processed_path = self.processed_paths[idx]
+        try:
+            data = torch.load(processed_path)
+        except Exception as exc:
+            raw_path = self.raw_paths[idx]
+            seq_id = os.path.splitext(os.path.basename(raw_path))[0]
+            print(f"[ArgoverseV1Dataset] reload failed for {processed_path}: {exc}. Rebuilding from {raw_path}.")
+            data = self._rebuild_processed_sample(idx, processed_path, raw_path, seq_id)
+        data = upgrade_legacy_temporal_data(data)
+        return _ensure_temporal_edge_keys(data)
+
+    def _get_map_api(self) -> ArgoverseMap:
+        if self._map_api is None:
+            self._map_api = ArgoverseMap()
+        return self._map_api
+
+    def _rebuild_processed_sample(self, idx: int, processed_path: str, raw_path: str, seq_id: str) -> Data:
+        kwargs = process_argoverse(self._split, raw_path, self._get_map_api(), self._local_radius)
+        data = TemporalData(**kwargs)
+        tmp_path = f"{processed_path}.tmp.{os.getpid()}"
+        torch.save(data, tmp_path)
+        os.replace(tmp_path, processed_path)
+        return torch.load(processed_path)
+
+
+def upgrade_legacy_temporal_data(data: Data) -> TemporalData:
+    """兼容旧版 PyG 生成的 TemporalData 序列化格式。"""
+    payload = getattr(data, "__dict__", {})
+    if "_store" in payload:
+        return data
+
+    kwargs = {
+        "x": payload.get("x"),
+        "positions": payload.get("positions"),
+        "edge_index": payload.get("edge_index"),
+        "y": payload.get("y"),
+        "num_nodes": payload.get("__num_nodes__", payload.get("num_nodes")),
+        "padding_mask": payload.get("padding_mask"),
+        "bos_mask": payload.get("bos_mask"),
+        "rotate_angles": payload.get("rotate_angles"),
+        "lane_vectors": payload.get("lane_vectors"),
+        "is_intersections": payload.get("is_intersections"),
+        "turn_directions": payload.get("turn_directions"),
+        "traffic_controls": payload.get("traffic_controls"),
+        "lane_actor_index": payload.get("lane_actor_index"),
+        "lane_actor_vectors": payload.get("lane_actor_vectors"),
+        "seq_id": payload.get("seq_id"),
+        "av_index": payload.get("av_index"),
+        "agent_index": payload.get("agent_index"),
+        "city": payload.get("city"),
+        "origin": payload.get("origin"),
+        "theta": payload.get("theta"),
+    }
+    return TemporalData(**kwargs)
 
 
 def process_argoverse(split: str,

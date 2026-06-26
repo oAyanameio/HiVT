@@ -111,3 +111,16 @@ venv.bak/
 # seed project
 lightning_logs/
 .DS_Store
+
+# datasets
+datasets/argoverse/
+
+# logs & runs
+logs/
+runs/
+
+# checkpoints
+checkpoints/
+
+# papers / large binaries
+*.pdf

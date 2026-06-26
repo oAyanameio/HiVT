@@ -12,4 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from losses.laplace_nll_loss import LaplaceNLLLoss
+from losses.reliability_losses import RiskCalibrationLoss
+from losses.reliability_losses import RiskRankLoss
 from losses.soft_target_cross_entropy_loss import SoftTargetCrossEntropyLoss

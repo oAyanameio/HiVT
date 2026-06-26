@@ -14,7 +14,7 @@
 from typing import Callable, Optional
 
 from pytorch_lightning import LightningDataModule
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 
 from datasets import ArgoverseV1Dataset
 
@@ -55,8 +55,8 @@ class ArgoverseV1DataModule(LightningDataModule):
     def train_dataloader(self):
         return DataLoader(self.train_dataset, batch_size=self.train_batch_size, shuffle=self.shuffle,
                           num_workers=self.num_workers, pin_memory=self.pin_memory,
-                          persistent_workers=self.persistent_workers)
+                          persistent_workers=self.persistent_workers and self.num_workers > 0)
 
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.val_batch_size, shuffle=False, num_workers=self.num_workers,
-                          pin_memory=self.pin_memory, persistent_workers=self.persistent_workers)
+                          pin_memory=self.pin_memory, persistent_workers=self.persistent_workers and self.num_workers > 0)

@@ -12,19 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pytorch_lightning as pl
+import pytorch_lightning.trainer.connectors.logger_connector.result as pl_result
+import pytorch_lightning.utilities.data as pl_data
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from losses import LaplaceNLLLoss
+from losses import RiskCalibrationLoss
+from losses import RiskRankLoss
 from losses import SoftTargetCrossEntropyLoss
 from metrics import ADE
+from metrics import AUROC
+from metrics import BrierScore
+from metrics import ECE
 from metrics import FDE
 from metrics import MR
 from models import GlobalInteractor
 from models import LocalEncoder
 from models import MLPDecoder
+from models import ReliabilityModule
+from models import build_reliability_targets
+from models import reconstruct_lane_positions
+from models import summarize_reliability_targets
 from utils import TemporalData
+from utils import extract_lightning_batch_size
+
+
+pl_data.extract_batch_size = extract_lightning_batch_size
+pl_result.extract_batch_size = extract_lightning_batch_size
 
 
 class HiVT(pl.LightningModule):
@@ -50,6 +66,16 @@ class HiVT(pl.LightningModule):
                  num_global_layers: int,
                  local_radius: float,
                  parallel: bool,
+                 use_reliability: bool,
+                 reliability_hidden_dim: int,
+                 reliability_rerank_alpha: float,
+                 reliability_loss_weight: float,
+                 scene_loss_weight: float,
+                 rank_loss_weight: float,
+                 calib_loss_weight: float,
+                 risk_fde_threshold: float,
+                 risk_conflict_threshold: float,
+                 risk_offroad_threshold: float,
                  lr: float,
                  weight_decay: float,
                  T_max: int,
@@ -82,6 +108,14 @@ class HiVT(pl.LightningModule):
         self.num_modes = num_modes
         self.rotate = rotate
         self.parallel = parallel
+        self.use_reliability = use_reliability
+        self.reliability_loss_weight = reliability_loss_weight
+        self.scene_loss_weight = scene_loss_weight
+        self.rank_loss_weight = rank_loss_weight
+        self.calib_loss_weight = calib_loss_weight
+        self.risk_fde_threshold = risk_fde_threshold
+        self.risk_conflict_threshold = risk_conflict_threshold
+        self.risk_offroad_threshold = risk_offroad_threshold
         self.lr = lr
         self.weight_decay = weight_decay
         self.T_max = T_max
@@ -108,12 +142,26 @@ class HiVT(pl.LightningModule):
                                   future_steps=future_steps,
                                   num_modes=num_modes,
                                   uncertain=True)
+        self.reliability_module = ReliabilityModule(
+            embed_dim=embed_dim,
+            future_steps=future_steps,
+            num_modes=num_modes,
+            hidden_dim=reliability_hidden_dim,
+            rerank_alpha=reliability_rerank_alpha,
+        ) if use_reliability else None
         self.reg_loss = LaplaceNLLLoss(reduction='mean')
         self.cls_loss = SoftTargetCrossEntropyLoss(reduction='mean')
+        self.risk_loss = nn.BCEWithLogitsLoss(reduction='mean')
+        self.rank_loss_fn = RiskRankLoss()
+        self.calib_loss_fn = RiskCalibrationLoss()
 
         self.minADE = ADE()
         self.minFDE = FDE()
         self.minMR = MR()
+        if use_reliability:
+            self.mode_risk_auroc = AUROC(compute_on_step=False)
+            self.mode_risk_brier = BrierScore()
+            self.mode_risk_ece = ECE()
 
     def forward(self, data: TemporalData):
         """前向传播。
@@ -147,7 +195,19 @@ class HiVT(pl.LightningModule):
         local_embed = self.local_encoder(data=data)
         global_embed = self.global_interactor(data=data, local_embed=local_embed)
         y_hat, pi = self.decoder(local_embed=local_embed, global_embed=global_embed)
-        return y_hat, pi
+        reliability_outputs = None
+        if self.reliability_module is not None:
+            batch = getattr(data, 'batch', None)
+            if batch is None:
+                batch = torch.zeros(data.num_nodes, dtype=torch.long, device=y_hat.device)
+            reliability_outputs = self.reliability_module(
+                local_embed=local_embed,
+                global_embed=global_embed,
+                y_hat=y_hat,
+                pi=pi,
+                batch=batch,
+            )
+        return y_hat, pi, reliability_outputs
 
     def training_step(self, data, batch_idx):
         """单个训练 step。
@@ -159,7 +219,7 @@ class HiVT(pl.LightningModule):
         Returns:
             总训练损失 = 轨迹回归损失 + 模态分类损失。
         """
-        y_hat, pi = self(data)
+        y_hat, pi, reliability_outputs = self(data)
         reg_mask = ~data['padding_mask'][:, self.historical_steps:]
         valid_steps = reg_mask.sum(dim=-1)
         cls_mask = valid_steps > 0
@@ -172,6 +232,67 @@ class HiVT(pl.LightningModule):
         soft_target = F.softmax(-l2_norm[:, cls_mask] / valid_steps[cls_mask], dim=0).t().detach()
         cls_loss = self.cls_loss(pi[cls_mask], soft_target)
         loss = reg_loss + cls_loss
+        if self.reliability_module is not None:
+            batch = getattr(data, 'batch', None)
+            if batch is None:
+                batch = torch.zeros(data.num_nodes, dtype=torch.long, device=y_hat.device)
+            current_positions = data['positions'][:, self.historical_steps - 1]
+            lane_positions = reconstruct_lane_positions(
+                lane_actor_index=data['lane_actor_index'],
+                lane_actor_vectors=data['lane_actor_vectors'],
+                current_positions=current_positions,
+                num_lanes=data['lane_vectors'].size(0),
+            )
+            reliability_targets = build_reliability_targets(
+                y_hat=y_hat.detach(),
+                y=data.y,
+                reg_mask=reg_mask,
+                batch=batch,
+                lane_positions=lane_positions,
+                lane_actor_index=data['lane_actor_index'],
+                lane_actor_vectors=data['lane_actor_vectors'],
+                fde_threshold=self.risk_fde_threshold,
+                conflict_threshold=self.risk_conflict_threshold,
+                offroad_threshold=self.risk_offroad_threshold,
+            )
+            mode_targets = reliability_targets['mode_targets']
+            valid_mask = reliability_targets['valid_mask']
+            scene_targets = reliability_targets['scene_targets']
+            risk_loss = self.risk_loss(
+                reliability_outputs['mode_risk_logits'][valid_mask],
+                mode_targets[valid_mask],
+            )
+            scene_loss = self.risk_loss(
+                reliability_outputs['scene_risk_logits'],
+                scene_targets,
+            ) if scene_targets.numel() > 0 else torch.zeros((), device=loss.device)
+            loss = loss + self.reliability_loss_weight * risk_loss + self.scene_loss_weight * scene_loss
+            if self.rank_loss_weight > 0:
+                rank_loss = self.rank_loss_fn(
+                    mode_risk=reliability_outputs['mode_risk'],
+                    mode_error=reliability_targets['mode_error'],
+                    valid_mask=valid_mask,
+                )
+                loss = loss + self.rank_loss_weight * rank_loss
+                self.log('train_rank_loss', rank_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            if self.calib_loss_weight > 0 and valid_mask.any():
+                calib_loss = self.calib_loss_fn(
+                    risk=reliability_outputs['mode_risk'][valid_mask],
+                    target=mode_targets[valid_mask],
+                )
+                loss = loss + self.calib_loss_weight * calib_loss
+                self.log('train_calib_loss', calib_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            risk_stats = summarize_reliability_targets(reliability_targets)
+            self.log('train_risk_loss', risk_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_scene_loss', scene_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_mode_risk_target_rate', risk_stats['mode_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_fde_risk_target_rate', risk_stats['fde_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_conflict_risk_target_rate', risk_stats['conflict_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_offroad_risk_target_rate', risk_stats['offroad_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_scene_risk_target_rate', risk_stats['scene_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_mode_risk_pred_mean', reliability_outputs['mode_risk'].mean(), prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            if reliability_outputs['scene_risk'].numel() > 0:
+                self.log('train_scene_risk_pred_mean', reliability_outputs['scene_risk'].mean(), prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
         self.log('train_reg_loss', reg_loss, prog_bar=True, on_step=True, on_epoch=True, batch_size=1)
         return loss
 
@@ -182,7 +303,7 @@ class HiVT(pl.LightningModule):
             data: 当前 batch 的图数据。
             batch_idx: Lightning 传入的 batch 索引。
         """
-        y_hat, pi = self(data)
+        y_hat, pi, reliability_outputs = self(data)
         reg_mask = ~data['padding_mask'][:, self.historical_steps:]
         l2_norm = (torch.norm(y_hat[:, :, :, : 2] - data.y, p=2, dim=-1) * reg_mask).sum(dim=-1)  # [F, N]
         best_mode = l2_norm.argmin(dim=0)
@@ -202,6 +323,56 @@ class HiVT(pl.LightningModule):
         self.log('val_minADE', self.minADE, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
         self.log('val_minFDE', self.minFDE, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
         self.log('val_minMR', self.minMR, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
+        if self.reliability_module is not None and reliability_outputs is not None:
+            batch = getattr(data, 'batch', None)
+            if batch is None:
+                batch = torch.zeros(data.num_nodes, dtype=torch.long, device=y_hat.device)
+            current_positions = data['positions'][:, self.historical_steps - 1]
+            lane_positions = reconstruct_lane_positions(
+                lane_actor_index=data['lane_actor_index'],
+                lane_actor_vectors=data['lane_actor_vectors'],
+                current_positions=current_positions,
+                num_lanes=data['lane_vectors'].size(0),
+            )
+            reliability_targets = build_reliability_targets(
+                y_hat=y_hat.detach(),
+                y=data.y,
+                reg_mask=reg_mask,
+                batch=batch,
+                lane_positions=lane_positions,
+                lane_actor_index=data['lane_actor_index'],
+                lane_actor_vectors=data['lane_actor_vectors'],
+                fde_threshold=self.risk_fde_threshold,
+                conflict_threshold=self.risk_conflict_threshold,
+                offroad_threshold=self.risk_offroad_threshold,
+            )
+            mode_targets = reliability_targets['mode_targets']
+            valid_mask = reliability_targets['valid_mask']
+            scene_targets = reliability_targets['scene_targets']
+            if valid_mask.any():
+                val_risk_loss = self.risk_loss(reliability_outputs['mode_risk_logits'][valid_mask], mode_targets[valid_mask])
+                self.log('val_risk_loss', val_risk_loss, prog_bar=False, on_step=False, on_epoch=True,
+                         batch_size=int(valid_mask.sum().item()))
+            if scene_targets.numel() > 0:
+                val_scene_loss = self.risk_loss(reliability_outputs['scene_risk_logits'], scene_targets)
+                self.log('val_scene_loss', val_scene_loss, prog_bar=False, on_step=False, on_epoch=True,
+                         batch_size=scene_targets.size(0))
+            risk_stats = summarize_reliability_targets(reliability_targets)
+            self.log('val_mode_risk_target_rate', risk_stats['mode_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_fde_risk_target_rate', risk_stats['fde_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_conflict_risk_target_rate', risk_stats['conflict_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_offroad_risk_target_rate', risk_stats['offroad_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_scene_risk_target_rate', risk_stats['scene_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_mode_risk_pred_mean', reliability_outputs['mode_risk'].mean(), prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            if reliability_outputs['scene_risk'].numel() > 0:
+                self.log('val_scene_risk_pred_mean', reliability_outputs['scene_risk'].mean(), prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            if valid_mask.any():
+                self.mode_risk_auroc.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
+                self.mode_risk_brier.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
+                self.mode_risk_ece.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
+                self.log('val_mode_AUROC', self.mode_risk_auroc, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
+                self.log('val_mode_BrierScore', self.mode_risk_brier, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
+                self.log('val_mode_ECE', self.mode_risk_ece, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
 
     def configure_optimizers(self):
         """配置优化器与学习率调度器。
@@ -241,7 +412,7 @@ class HiVT(pl.LightningModule):
 
         optimizer = torch.optim.AdamW(optim_groups, lr=self.lr, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=self.T_max, eta_min=0.0)
-        return [optimizer], [scheduler]
+        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -268,6 +439,16 @@ class HiVT(pl.LightningModule):
         parser.add_argument('--num_global_layers', type=int, default=3)
         parser.add_argument('--local_radius', type=float, default=50)
         parser.add_argument('--parallel', type=bool, default=False)
+        parser.add_argument('--use_reliability', type=bool, default=False)
+        parser.add_argument('--reliability_hidden_dim', type=int, default=128)
+        parser.add_argument('--reliability_rerank_alpha', type=float, default=0.5)
+        parser.add_argument('--reliability_loss_weight', type=float, default=1.0)
+        parser.add_argument('--scene_loss_weight', type=float, default=0.5)
+        parser.add_argument('--rank_loss_weight', type=float, default=0.0)
+        parser.add_argument('--calib_loss_weight', type=float, default=0.0)
+        parser.add_argument('--risk_fde_threshold', type=float, default=2.0)
+        parser.add_argument('--risk_conflict_threshold', type=float, default=2.0)
+        parser.add_argument('--risk_offroad_threshold', type=float, default=2.0)
         parser.add_argument('--lr', type=float, default=5e-4)
         parser.add_argument('--weight_decay', type=float, default=1e-4)
         parser.add_argument('--T_max', type=int, default=64)

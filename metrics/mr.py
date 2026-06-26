@@ -19,6 +19,8 @@ from torchmetrics import Metric
 
 class MR(Metric):
 
+    full_state_update = False
+
     def __init__(self,
                  miss_threshold: float = 2.0,
                  compute_on_step: bool = True,

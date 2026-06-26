@@ -12,9 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from argparse import ArgumentParser
+import warnings
+
+
+warnings.filterwarnings(
+    'ignore',
+    message=r'pkg_resources is deprecated as an API.*',
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    'ignore',
+    message=r"Deprecated call to `pkg_resources\\.declare_namespace\\('.*'\\)`\\.",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    'ignore',
+    message=r'torch\\.distributed\\._sharded_tensor will be deprecated.*',
+    category=DeprecationWarning,
+)
 
 import pytorch_lightning as pl
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 
 from datasets import ArgoverseV1Dataset
 from models.hivt import HiVT
