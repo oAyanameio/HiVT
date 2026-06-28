@@ -55,3 +55,12 @@ def test_build_reliability_train_args_accepts_overrides():
     assert args["risk_conflict_min_frames"] == 3
     assert args["risk_conflict_scope"] == "all_valid_pairs"
     assert args["risk_scene_rate_threshold"] == 0.3
+
+
+def test_build_reliability_train_args_accepts_freeze_backbone_flag():
+    args = training_presets.build_reliability_train_args(
+        embed_dim=64,
+        freeze_backbone=True,
+    )
+
+    assert args["freeze_backbone"] is True

@@ -53,11 +53,15 @@ if __name__ == '__main__':
     parser.add_argument('--persistent_workers', type=bool, default=True)
     parser.add_argument('--gpus', type=int, default=1)
     parser.add_argument('--max_epochs', type=int, default=64)
+    parser.add_argument('--limit_train_batches', type=float, default=1.0)
+    parser.add_argument('--limit_val_batches', type=float, default=1.0)
     parser.add_argument('--monitor', type=str, default='val_minFDE', choices=['val_minADE', 'val_minFDE', 'val_minMR'])
     parser.add_argument('--save_top_k', type=int, default=5)
     parser.add_argument('--experiment_root', type=str, default='/home/lbh/HiVT/runs')
     parser.add_argument('--experiment_name', type=str, default='hivt')
     parser.add_argument('--experiment_version', type=str, default=None)
+    parser.add_argument('--ckpt_path', type=str, default=None)
+    parser.add_argument('--init_ckpt_path', type=str, default=None)
     # 分布偏移增强（§11）；默认全 0 = 不启用
     parser.add_argument('--shift_history_dropout_p', type=float, default=0.0)
     parser.add_argument('--shift_neighbor_dropout_p', type=float, default=0.0)
@@ -93,6 +97,13 @@ if __name__ == '__main__':
         save_last=True,
     )
     trainer = pl.Trainer.from_argparse_args(args, callbacks=[model_checkpoint], logger=logger)
-    model = HiVT(**vars(args))
+    if args.init_ckpt_path:
+        model = HiVT.load_from_checkpoint(
+            checkpoint_path=args.init_ckpt_path,
+            strict=False,
+            **vars(args),
+        )
+    else:
+        model = HiVT(**vars(args))
     datamodule = ArgoverseV1DataModule.from_argparse_args(args, train_transform=train_transform)
-    trainer.fit(model, datamodule)
+    trainer.fit(model, datamodule, ckpt_path=args.ckpt_path)

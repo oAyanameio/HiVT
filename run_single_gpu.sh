@@ -32,6 +32,11 @@ Environment overrides:
   VAL_BATCH_SIZE=32
   EVAL_BATCH_SIZE=32
   NUM_WORKERS=8
+  LIMIT_TRAIN_BATCHES=1.0
+  LIMIT_VAL_BATCHES=1.0
+  MAX_EPOCHS=64
+  CKPT_PATH=/path/to/checkpoint.ckpt
+  INIT_CKPT_PATH=/path/to/checkpoint.ckpt
   # shift augmentation overrides（仅对 train_reliability_shift 有效）
   SHIFT_HISTORY_DROPOUT_P=0.3
   SHIFT_NEIGHBOR_DROPOUT_P=0.2
@@ -49,6 +54,7 @@ Environment overrides:
   RISK_SCENE_RATE_THRESHOLD=0.5
   RELIABILITY_RERANK_ALPHA=0.0
   SCENE_LOSS_WEIGHT=0.2
+  FREEZE_BACKBONE=false
 EOF
 }
 
@@ -190,6 +196,11 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   local train_batch_size="${TRAIN_BATCH_SIZE:-32}"
   local val_batch_size="${VAL_BATCH_SIZE:-32}"
   local num_workers="${NUM_WORKERS:-8}"
+  local limit_train_batches="${LIMIT_TRAIN_BATCHES:-1.0}"
+  local limit_val_batches="${LIMIT_VAL_BATCHES:-1.0}"
+  local max_epochs="${MAX_EPOCHS:-64}"
+  local ckpt_path="${CKPT_PATH:-}"
+  local init_ckpt_path="${INIT_CKPT_PATH:-}"
   local run_version="${RUN_VERSION:-reliability_$(date +%Y%m%d_%H%M%S)_dim${embed_dim}_gpu${gpu_id}}"
   local experiment_name="${EXPERIMENT_NAME:-hivt_reliability}"
   local mode_target_policy="${MODE_TARGET_POLICY:-fde_only}"
@@ -202,6 +213,7 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   local risk_scene_rate_threshold="${RISK_SCENE_RATE_THRESHOLD:-0.5}"
   local reliability_rerank_alpha="${RELIABILITY_RERANK_ALPHA:-0.0}"
   local scene_loss_weight="${SCENE_LOSS_WEIGHT:-0.2}"
+  local freeze_backbone="${FREEZE_BACKBONE:-false}"
 
   check_data_ready
   check_preprocessed_hint
@@ -212,8 +224,10 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   cd "$PROJECT_ROOT"
   echo "Using GPU $gpu_id for reliability training"
   echo "embed_dim=$embed_dim train_batch_size=$train_batch_size val_batch_size=$val_batch_size num_workers=$num_workers"
+  echo "limit_train_batches=$limit_train_batches limit_val_batches=$limit_val_batches"
+  echo "max_epochs=$max_epochs ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
   echo "experiment_name=$experiment_name run_version=$run_version"
-  echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope"
+  echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope freeze_backbone=$freeze_backbone"
 
   exec env CUDA_VISIBLE_DEVICES="$gpu_id" PYTHONUNBUFFERED=1 python train.py \
     --root "$DATA_ROOT" \
@@ -222,6 +236,9 @@ run_train_reliability() {  local embed_choice="${1:-64}"
     --train_batch_size "$train_batch_size" \
     --val_batch_size "$val_batch_size" \
     --num_workers "$num_workers" \
+    --max_epochs "$max_epochs" \
+    --limit_train_batches "$limit_train_batches" \
+    --limit_val_batches "$limit_val_batches" \
     --experiment_root "$RUNS_ROOT" \
     --experiment_name "$experiment_name" \
     --experiment_version "$run_version" \
@@ -235,7 +252,10 @@ run_train_reliability() {  local embed_choice="${1:-64}"
     --risk_conflict_scope "$risk_conflict_scope" \
     --risk_scene_rate_threshold "$risk_scene_rate_threshold" \
     --mode_target_policy "$mode_target_policy" \
-    --scene_target_policy "$scene_target_policy"
+    --scene_target_policy "$scene_target_policy" \
+    --freeze_backbone "$freeze_backbone" \
+    ${init_ckpt_path:+--init_ckpt_path "$init_ckpt_path"} \
+    ${ckpt_path:+--ckpt_path "$ckpt_path"}
 }
 
 run_train_reliability_shift() {
@@ -252,6 +272,11 @@ run_train_reliability_shift() {
   local train_batch_size="${TRAIN_BATCH_SIZE:-32}"
   local val_batch_size="${VAL_BATCH_SIZE:-32}"
   local num_workers="${NUM_WORKERS:-8}"
+  local limit_train_batches="${LIMIT_TRAIN_BATCHES:-1.0}"
+  local limit_val_batches="${LIMIT_VAL_BATCHES:-1.0}"
+  local max_epochs="${MAX_EPOCHS:-64}"
+  local ckpt_path="${CKPT_PATH:-}"
+  local init_ckpt_path="${INIT_CKPT_PATH:-}"
   local run_version="${RUN_VERSION:-reliability_shift_$(date +%Y%m%d_%H%M%S)_dim${embed_dim}_gpu${gpu_id}}"
   local experiment_name="${EXPERIMENT_NAME:-hivt_reliability}"
   local mode_target_policy="${MODE_TARGET_POLICY:-fde_only}"
@@ -264,6 +289,7 @@ run_train_reliability_shift() {
   local risk_scene_rate_threshold="${RISK_SCENE_RATE_THRESHOLD:-0.5}"
   local reliability_rerank_alpha="${RELIABILITY_RERANK_ALPHA:-0.0}"
   local scene_loss_weight="${SCENE_LOSS_WEIGHT:-0.2}"
+  local freeze_backbone="${FREEZE_BACKBONE:-false}"
 
   check_data_ready
   check_preprocessed_hint
@@ -274,7 +300,9 @@ run_train_reliability_shift() {
   cd "$PROJECT_ROOT"
   echo "Using GPU $gpu_id for reliability+shift training"
   echo "embed_dim=$embed_dim train_batch_size=$train_batch_size run_version=$run_version"
-  echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope"
+  echo "limit_train_batches=$limit_train_batches limit_val_batches=$limit_val_batches"
+  echo "max_epochs=$max_epochs ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
+  echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope freeze_backbone=$freeze_backbone"
 
   exec env CUDA_VISIBLE_DEVICES="$gpu_id" PYTHONUNBUFFERED=1 python train.py \
     --root "$DATA_ROOT" \
@@ -283,6 +311,9 @@ run_train_reliability_shift() {
     --train_batch_size "$train_batch_size" \
     --val_batch_size "$val_batch_size" \
     --num_workers "$num_workers" \
+    --max_epochs "$max_epochs" \
+    --limit_train_batches "$limit_train_batches" \
+    --limit_val_batches "$limit_val_batches" \
     --experiment_root "$RUNS_ROOT" \
     --experiment_name "$experiment_name" \
     --experiment_version "$run_version" \
@@ -297,6 +328,9 @@ run_train_reliability_shift() {
     --risk_scene_rate_threshold "$risk_scene_rate_threshold" \
     --mode_target_policy "$mode_target_policy" \
     --scene_target_policy "$scene_target_policy" \
+    --freeze_backbone "$freeze_backbone" \
+    ${init_ckpt_path:+--init_ckpt_path "$init_ckpt_path"} \
+    ${ckpt_path:+--ckpt_path "$ckpt_path"} \
     --shift_history_dropout_p "${SHIFT_HISTORY_DROPOUT_P:-0.3}" \
     --shift_neighbor_dropout_p "${SHIFT_NEIGHBOR_DROPOUT_P:-0.2}" \
     --shift_position_noise_std "${SHIFT_POSITION_NOISE_STD:-0.1}" \

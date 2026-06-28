@@ -35,8 +35,8 @@ class BrierScore(Metric):
                  dist_sync_on_step: bool = False,
                  process_group: Optional[Any] = None,
                  dist_sync_fn: Optional[Callable] = None) -> None:
-        super().__init__(compute_on_step=compute_on_step,
-                         dist_sync_on_step=dist_sync_on_step,
+        self.compute_on_step = compute_on_step
+        super().__init__(dist_sync_on_step=dist_sync_on_step,
                          process_group=process_group,
                          dist_sync_fn=dist_sync_fn)
         self.add_state('sum', default=torch.tensor(0.0), dist_reduce_fx='sum')
@@ -61,8 +61,8 @@ class ECE(Metric):
                  dist_sync_on_step: bool = False,
                  process_group: Optional[Any] = None,
                  dist_sync_fn: Optional[Callable] = None) -> None:
-        super().__init__(compute_on_step=compute_on_step,
-                         dist_sync_on_step=dist_sync_on_step,
+        self.compute_on_step = compute_on_step
+        super().__init__(dist_sync_on_step=dist_sync_on_step,
                          process_group=process_group,
                          dist_sync_fn=dist_sync_fn)
         self.num_bins = num_bins
@@ -98,8 +98,8 @@ class _BinaryRankingMetric(Metric):
                  dist_sync_on_step: bool = False,
                  process_group: Optional[Any] = None,
                  dist_sync_fn: Optional[Callable] = None) -> None:
-        super().__init__(compute_on_step=compute_on_step,
-                         dist_sync_on_step=dist_sync_on_step,
+        self.compute_on_step = compute_on_step
+        super().__init__(dist_sync_on_step=dist_sync_on_step,
                          process_group=process_group,
                          dist_sync_fn=dist_sync_fn)
         self.add_state('preds', default=[], dist_reduce_fx='cat')
@@ -143,6 +143,8 @@ class AUPRC(_BinaryRankingMetric):
         fp = (1 - targets).cumsum(0)
         precision = tp / (tp + fp).clamp(min=1e-6)
         recall = tp / n_pos
+        precision = torch.cat([precision.new_tensor([1.0]), precision])
+        recall = torch.cat([recall.new_tensor([0.0]), recall])
         return torch.trapz(precision, recall).abs()
 
 

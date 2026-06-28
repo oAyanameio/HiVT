@@ -18,6 +18,7 @@ def build_reliability_train_args(
     mode_target_policy: str = "fde_only",
     scene_target_policy: str = "target_best_mode_fail",
     risk_conflict_scope: str = "target_to_neighbors",
+    freeze_backbone: bool = False,
     **overrides: Any,
 ) -> Dict[str, Any]:
     args: Dict[str, Any] = {
@@ -38,6 +39,7 @@ def build_reliability_train_args(
         "mode_target_policy": mode_target_policy,
         "scene_target_policy": scene_target_policy,
         "risk_conflict_scope": risk_conflict_scope,
+        "freeze_backbone": freeze_backbone,
     }
     args.update(overrides)
     return args

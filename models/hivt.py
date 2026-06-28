@@ -83,6 +83,7 @@ class HiVT(pl.LightningModule):
                  risk_conflict_min_frames: int,
                  risk_conflict_scope: str,
                  risk_scene_rate_threshold: float,
+                 freeze_backbone: bool,
                  lr: float,
                  weight_decay: float,
                  T_max: int,
@@ -129,6 +130,7 @@ class HiVT(pl.LightningModule):
         self.risk_conflict_min_frames = risk_conflict_min_frames
         self.risk_conflict_scope = risk_conflict_scope
         self.risk_scene_rate_threshold = risk_scene_rate_threshold
+        self.freeze_backbone = freeze_backbone
         self.lr = lr
         self.weight_decay = weight_decay
         self.T_max = T_max
@@ -176,6 +178,8 @@ class HiVT(pl.LightningModule):
             self.mode_risk_auprc = AUPRC(compute_on_step=False)
             self.mode_risk_brier = BrierScore()
             self.mode_risk_ece = ECE()
+            self.scene_risk_brier = BrierScore()
+            self.scene_risk_ece = ECE()
 
     def forward(self, data: TemporalData):
         """前向传播。
@@ -393,6 +397,12 @@ class HiVT(pl.LightningModule):
                 val_scene_loss = self.risk_loss(reliability_outputs['scene_risk_logits'], scene_targets)
                 self.log('val_scene_loss', val_scene_loss, prog_bar=False, on_step=False, on_epoch=True,
                          batch_size=scene_targets.size(0))
+                self.scene_risk_brier.update(reliability_outputs['scene_risk'], scene_targets)
+                self.scene_risk_ece.update(reliability_outputs['scene_risk'], scene_targets)
+                self.log('val_scene_BrierScore', self.scene_risk_brier, prog_bar=False, on_step=False, on_epoch=True,
+                         batch_size=scene_targets.size(0))
+                self.log('val_scene_ECE', self.scene_risk_ece, prog_bar=False, on_step=False, on_epoch=True,
+                         batch_size=scene_targets.size(0))
             risk_stats = summarize_reliability_targets(reliability_targets)
             self.log('val_mode_risk_target_rate', risk_stats['mode_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             self.log('val_fde_risk_target_rate', risk_stats['fde_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
@@ -404,6 +414,10 @@ class HiVT(pl.LightningModule):
             self.log('val_mode_risk_pred_mean', reliability_outputs['mode_risk'].mean(), prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             if reliability_outputs['scene_risk'].numel() > 0:
                 self.log('val_scene_risk_pred_mean', reliability_outputs['scene_risk'].mean(), prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            original_top1 = pi.argmax(dim=-1)
+            reranked_top1 = reliability_outputs['reranked_pi'].argmax(dim=-1)
+            top1_changed = (original_top1 != reranked_top1).float().mean()
+            self.log('val_rerank_top1_change_rate', top1_changed, prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             if valid_mask.any():
                 self.mode_risk_auroc.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
                 self.mode_risk_auprc.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
@@ -420,6 +434,10 @@ class HiVT(pl.LightningModule):
         Returns:
             Lightning 期望格式的 `[optimizer], [scheduler]`。
         """
+        if self.freeze_backbone:
+            for module in (self.local_encoder, self.global_interactor, self.decoder):
+                for param in module.parameters():
+                    param.requires_grad = False
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.MultiheadAttention, nn.LSTM, nn.GRU)
@@ -437,10 +455,15 @@ class HiVT(pl.LightningModule):
                         no_decay.add(full_param_name)
                 elif not ('weight' in param_name or 'bias' in param_name):
                     no_decay.add(full_param_name)
-        param_dict = {param_name: param for param_name, param in self.named_parameters()}
+        param_dict = {
+            param_name: param for param_name, param in self.named_parameters() if param.requires_grad
+        }
+        decay = decay & set(param_dict.keys())
+        no_decay = no_decay & set(param_dict.keys())
         inter_params = decay & no_decay
         union_params = decay | no_decay
         assert len(inter_params) == 0
+        assert len(param_dict) > 0
         assert len(param_dict.keys() - union_params) == 0
 
         optim_groups = [
@@ -498,6 +521,7 @@ class HiVT(pl.LightningModule):
                             choices=['target_best_mode_fail', 'target_mode_rate', 'scene_rate', 'scene_max'])
         parser.add_argument('--risk_conflict_scope', type=str, default='target_to_neighbors',
                             choices=['target_to_neighbors', 'all_valid_pairs'])
+        parser.add_argument('--freeze_backbone', type=bool, default=False)
         parser.add_argument('--lr', type=float, default=5e-4)
         parser.add_argument('--weight_decay', type=float, default=1e-4)
         parser.add_argument('--T_max', type=int, default=64)
