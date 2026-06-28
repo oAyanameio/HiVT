@@ -39,6 +39,16 @@ Environment overrides:
   SHIFT_HEADING_NOISE_STD=0.05
   SHIFT_MAP_JITTER_STD=0.05
   SHIFT_LANE_DROPOUT_P=0.1
+  MODE_TARGET_POLICY=fde_only
+  SCENE_TARGET_POLICY=target_best_mode_fail
+  RISK_FDE_THRESHOLD=2.0
+  RISK_MISS_THRESHOLD=4.0
+  RISK_CONFLICT_THRESHOLD=1.0
+  RISK_CONFLICT_MIN_FRAMES=2
+  RISK_CONFLICT_SCOPE=target_to_neighbors
+  RISK_SCENE_RATE_THRESHOLD=0.5
+  RELIABILITY_RERANK_ALPHA=0.0
+  SCENE_LOSS_WEIGHT=0.2
 EOF
 }
 
@@ -182,6 +192,16 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   local num_workers="${NUM_WORKERS:-8}"
   local run_version="${RUN_VERSION:-reliability_$(date +%Y%m%d_%H%M%S)_dim${embed_dim}_gpu${gpu_id}}"
   local experiment_name="${EXPERIMENT_NAME:-hivt_reliability}"
+  local mode_target_policy="${MODE_TARGET_POLICY:-fde_only}"
+  local scene_target_policy="${SCENE_TARGET_POLICY:-target_best_mode_fail}"
+  local risk_fde_threshold="${RISK_FDE_THRESHOLD:-2.0}"
+  local risk_miss_threshold="${RISK_MISS_THRESHOLD:-4.0}"
+  local risk_conflict_threshold="${RISK_CONFLICT_THRESHOLD:-1.0}"
+  local risk_conflict_min_frames="${RISK_CONFLICT_MIN_FRAMES:-2}"
+  local risk_conflict_scope="${RISK_CONFLICT_SCOPE:-target_to_neighbors}"
+  local risk_scene_rate_threshold="${RISK_SCENE_RATE_THRESHOLD:-0.5}"
+  local reliability_rerank_alpha="${RELIABILITY_RERANK_ALPHA:-0.0}"
+  local scene_loss_weight="${SCENE_LOSS_WEIGHT:-0.2}"
 
   check_data_ready
   check_preprocessed_hint
@@ -193,6 +213,7 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   echo "Using GPU $gpu_id for reliability training"
   echo "embed_dim=$embed_dim train_batch_size=$train_batch_size val_batch_size=$val_batch_size num_workers=$num_workers"
   echo "experiment_name=$experiment_name run_version=$run_version"
+  echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope"
 
   exec env CUDA_VISIBLE_DEVICES="$gpu_id" PYTHONUNBUFFERED=1 python train.py \
     --root "$DATA_ROOT" \
@@ -204,7 +225,17 @@ run_train_reliability() {  local embed_choice="${1:-64}"
     --experiment_root "$RUNS_ROOT" \
     --experiment_name "$experiment_name" \
     --experiment_version "$run_version" \
-    --use_reliability true
+    --use_reliability true \
+    --reliability_rerank_alpha "$reliability_rerank_alpha" \
+    --scene_loss_weight "$scene_loss_weight" \
+    --risk_fde_threshold "$risk_fde_threshold" \
+    --risk_miss_threshold "$risk_miss_threshold" \
+    --risk_conflict_threshold "$risk_conflict_threshold" \
+    --risk_conflict_min_frames "$risk_conflict_min_frames" \
+    --risk_conflict_scope "$risk_conflict_scope" \
+    --risk_scene_rate_threshold "$risk_scene_rate_threshold" \
+    --mode_target_policy "$mode_target_policy" \
+    --scene_target_policy "$scene_target_policy"
 }
 
 run_train_reliability_shift() {
@@ -223,6 +254,16 @@ run_train_reliability_shift() {
   local num_workers="${NUM_WORKERS:-8}"
   local run_version="${RUN_VERSION:-reliability_shift_$(date +%Y%m%d_%H%M%S)_dim${embed_dim}_gpu${gpu_id}}"
   local experiment_name="${EXPERIMENT_NAME:-hivt_reliability}"
+  local mode_target_policy="${MODE_TARGET_POLICY:-fde_only}"
+  local scene_target_policy="${SCENE_TARGET_POLICY:-target_best_mode_fail}"
+  local risk_fde_threshold="${RISK_FDE_THRESHOLD:-2.0}"
+  local risk_miss_threshold="${RISK_MISS_THRESHOLD:-4.0}"
+  local risk_conflict_threshold="${RISK_CONFLICT_THRESHOLD:-1.0}"
+  local risk_conflict_min_frames="${RISK_CONFLICT_MIN_FRAMES:-2}"
+  local risk_conflict_scope="${RISK_CONFLICT_SCOPE:-target_to_neighbors}"
+  local risk_scene_rate_threshold="${RISK_SCENE_RATE_THRESHOLD:-0.5}"
+  local reliability_rerank_alpha="${RELIABILITY_RERANK_ALPHA:-0.0}"
+  local scene_loss_weight="${SCENE_LOSS_WEIGHT:-0.2}"
 
   check_data_ready
   check_preprocessed_hint
@@ -233,6 +274,7 @@ run_train_reliability_shift() {
   cd "$PROJECT_ROOT"
   echo "Using GPU $gpu_id for reliability+shift training"
   echo "embed_dim=$embed_dim train_batch_size=$train_batch_size run_version=$run_version"
+  echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope"
 
   exec env CUDA_VISIBLE_DEVICES="$gpu_id" PYTHONUNBUFFERED=1 python train.py \
     --root "$DATA_ROOT" \
@@ -245,6 +287,16 @@ run_train_reliability_shift() {
     --experiment_name "$experiment_name" \
     --experiment_version "$run_version" \
     --use_reliability true \
+    --reliability_rerank_alpha "$reliability_rerank_alpha" \
+    --scene_loss_weight "$scene_loss_weight" \
+    --risk_fde_threshold "$risk_fde_threshold" \
+    --risk_miss_threshold "$risk_miss_threshold" \
+    --risk_conflict_threshold "$risk_conflict_threshold" \
+    --risk_conflict_min_frames "$risk_conflict_min_frames" \
+    --risk_conflict_scope "$risk_conflict_scope" \
+    --risk_scene_rate_threshold "$risk_scene_rate_threshold" \
+    --mode_target_policy "$mode_target_policy" \
+    --scene_target_policy "$scene_target_policy" \
     --shift_history_dropout_p "${SHIFT_HISTORY_DROPOUT_P:-0.3}" \
     --shift_neighbor_dropout_p "${SHIFT_NEIGHBOR_DROPOUT_P:-0.2}" \
     --shift_position_noise_std "${SHIFT_POSITION_NOISE_STD:-0.1}" \

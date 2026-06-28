@@ -278,30 +278,32 @@ HiVT 在这个工作中是首个宿主 backbone。真正的方法贡献是“可
 - `y_fde = 1(FDE_k > tau_fde)`
 - `y_ade = 1(ADE_k > tau_ade)`
 - `y_offroad = 1(trajectory leaves drivable area)`
-- `y_conflict = 1(min future distance < tau_col)`
+- `y_conflict = 1(target prediction stays close to neighbor GT future for m frames)`
 - `y_miss = 1(mode misses GT beyond threshold)`
 
-综合标签可以定义为：
+当前默认主标签定义为：
 
-`y_risk = max(y_fde, y_offroad, y_conflict, y_miss)`
+`y_risk = y_fde`
+
+`ADE / miss / conflict / off-road` 保留为辅助统计或显式对照；五类并集只作为 `mode_target_policy=all_union` 的 legacy 对照，不再作为默认主监督。
 
 ### 9.2 Scene-level 标签
 
-场景风险可由 mode 风险聚合得到，例如：
+场景风险当前采用 target-centric 聚合：
 
-- `y_scene = max_k(y_risk_k)`
+- `y_scene = 1(target actor positive mode rate > rho)`
 
-也可以只关注 target actor 或 best mode 的风险状态，但第一版建议先用“场景内是否存在明显高风险预测”作为定义。
+当前推荐 `rho=0.67`。全场景 hard max 只作为 `scene_target_policy=scene_max` 的 legacy 对照保留，不再作为默认 scene label。
 
 ### 9.3 MVP 标签建议
 
-第一版最小实现建议只做：
+当前 conservative fix 已采用：
 
 - `FDE failure`
-- `off-road`
-- `conflict`
+- `target_mode_rate` scene label
+- `target prediction vs neighbor GT future` conflict 代理
 
-其中最容易最先落地的是 `FDE failure`，这也是当前仓库里已经实现的第一版切入点。
+`off-road` 与 `conflict` 当前默认不进入主 `mode_targets`，只作为日志和安全代理指标。
 
 ## 10. 训练方式
 
@@ -614,7 +616,7 @@ HiVT 在这个工作中是首个宿主 backbone。真正的方法贡献是“可
 **仍需推进（论文版本）：**
 
 - 更精确的 off-road 几何标签（目前为 lane 中心线距离代理，非 drivable-area polygon）
-- 更强的 conflict 时序/交互标签（目前为轨迹间最小距离）
+- 更强的 conflict 时序/交互标签（当前已从轨迹最小距离改为 target prediction vs neighbor GT future 的持续接近代理；论文版本可继续增强为更精确碰撞语义）
 - §11.4 场景难例子集的系统化构造与评估协议
 - 多 backbone 泛化验证（QCNet / MTR / Wayformer）
 
@@ -708,9 +710,9 @@ HiVT 在这个工作中是首个宿主 backbone。真正的方法贡献是“可
    - 对 mode 选择可能有轻微正向作用
    - 但尚未形成有说服力的精度收益
 
-### 20.5 更关键的发现：当前 risk 标签已经塌缩
+### 20.5 更关键的历史发现：risk 标签曾经塌缩
 
-本次实验里，reliability 分支暴露出一个比精度更重要的问题：
+本次实验里，reliability 分支曾暴露出一个比精度更重要的问题：
 
 - `train_mode_risk_target_rate = 1.0`
 - `val_mode_risk_target_rate = 1.0`
@@ -723,31 +725,220 @@ HiVT 在这个工作中是首个宿主 backbone。真正的方法贡献是“可
 - `train_scene_risk_pred_mean ≈ 0.99 ~ 1.00`
 - `val_scene_risk_pred_mean ≈ 0.9994`
 
-这说明在当前标签定义与阈值设置下：
+这说明在当时的标签定义与阈值设置下：
 
 - 风险标签几乎全是正样本
 - risk head 学到的是“几乎所有 mode 都高风险”
-- reliability 分支已经出现明显塌缩
+- reliability 分支出现明显塌缩
 
-因此当前的 `AUROC / Brier / ECE` 数值 **不能被直接解读成插件已经具备可靠的风险估计能力**，因为标签分布本身已经失去判别性。
+因此第 20 节中的 `AUROC / Brier / ECE` 数值不能被直接解读成插件已经具备可靠的风险估计能力，因为当时标签分布本身已经失去判别性。该问题已在第 21 节通过 conservative fix 修复。
 
 ### 20.6 当前最合理的判断
 
-截至 2026-06-26，当前插件的状态可以总结为：
+截至 2026-06-26，修复前插件状态可以总结为：
 
 - 结构层面：已打通
 - 训练层面：已可联合训练
 - 精度层面：尚未证明明显收益
-- 可靠性层面：当前标签设计过密，risk learning 已塌缩，尚未形成可信结论
+- 可靠性层面：当时标签设计过密，risk learning 出现塌缩，未形成可信结论
 
-### 20.7 下一步优先级
+### 20.7 后续处理情况
 
-在继续扩大实验之前，最优先的不是做更多消融，而是先修正 reliability supervision 的可判别性，重点包括：
+第 20 节提出的下一步是先修正 reliability supervision 的可判别性，重点包括：
 
-1. 调整 `conflict` 风险阈值，避免几乎全正
+1. 调整 `conflict` 风险阈值，降低过密正样本
 2. 调整 `scene risk` 聚合方式，避免场景标签恒为 1
 3. 改进 `off-road` 代理标签，使其不只依赖 lane 中心线距离
 4. 在标签分布恢复正常后，再重新比较：
    - 宿主模型 vs 插件模型
    - reranking 前后表现
    - shift 条件下的失败检测能力
+
+这些标签修复工作已经在第 21 节完成。当前新的优先级不再是修复标签塌缩，而是验证 `freeze backbone` 与 `reranking-only` 是否能在不破坏宿主预测指标的前提下发挥可靠性模块价值。
+
+## 21. 标签塌缩修复与阶段性复验（2026-06-27）
+
+### 21.1 修复动机
+
+第 20 节实验暴露的核心问题不是插件结构无法训练，而是自动风险标签协议过密：
+
+- `mode_risk_target_rate = 1.0`
+- `conflict_risk_target_rate = 1.0`
+- `scene_risk_target_rate = 1.0`
+
+这会让 reliability head 的最优策略退化成“所有 mode / scene 都预测为高风险”，导致 `AUROC / Brier / ECE` 失去解释意义。
+
+因此本轮修复优先解决 supervision collapse，而不是扩大训练规模。
+
+### 21.2 已完成的 conservative fix
+
+本轮实现了第一阶段保守修复：
+
+- 主 `mode_targets` 默认改为 `fde_only`，不再默认并入 `ADE / miss / conflict / offroad`。
+- `conflict_targets` 改为 target actor 预测轨迹与邻车 GT future 的同时间步持续接近代理。
+- `scene_targets` 支持 `target_best_mode_fail`、`target_mode_rate`、`scene_rate`、`scene_max`。
+- `agent_index` 显式传入标签构造函数，保证 target-centric 策略不会退化成全 actor 聚合。
+- 新增 `scripts/audit_reliability_targets.py`，支持加载宿主 checkpoint 做无反传标签体检。
+- 训练与验证日志补齐 `ADE / miss / AUPRC` 等指标。
+
+### 21.3 Label audit 结果
+
+使用已训练宿主 checkpoint：
+
+```text
+/home/lbh/HiVT/checkpoints/HiVT-64/checkpoints/epoch=63-step=411903.ckpt
+```
+
+在 `val` split 上审计前 4 个 batch，默认 `target_best_mode_fail` 得到：
+
+```text
+mode_positive_rate          = 0.4085
+fde_positive_rate           = 0.4085
+miss_positive_rate          = 0.2156
+conflict_positive_rate      = 0.0008
+offroad_positive_rate       = 0.1815
+scene_positive_rate         = 0.0625
+target_actor_mode_rate      = 0.6823
+target_best_mode_fail_rate  = 0.0625
+```
+
+结论：
+
+- 主 `mode` 标签已经恢复到可训练区间。
+- `conflict` 已降至稀疏安全事件区间，且不再污染主监督。
+- `target_best_mode_fail` 作为 scene label 过于保守，scene 正样本率偏低。
+
+进一步扫描 `scene_target_policy=target_mode_rate`：
+
+| scene policy | rho | scene_positive_rate | 结论 |
+|---|---:|---:|---|
+| `target_mode_rate` | 0.50 | 0.7500 | 偏高 |
+| `target_mode_rate` | 0.67 | 0.4063 | 合适 |
+| `target_mode_rate` | 0.75 | 0.4063 | 合适 |
+
+阶段性推荐配置：
+
+```text
+mode_target_policy=fde_only
+scene_target_policy=target_mode_rate
+risk_scene_rate_threshold=0.67
+risk_fde_threshold=2.0
+risk_miss_threshold=4.0
+risk_conflict_threshold=1.0
+risk_conflict_min_frames=2
+risk_conflict_scope=target_to_neighbors
+reliability_rerank_alpha=0.0
+scene_loss_weight=0.2
+rank_loss_weight=0.0
+calib_loss_weight=0.0
+```
+
+### 21.4 小预算训练复验
+
+实验设置：
+
+- 初始化：宿主 `HiVT-64` checkpoint，`reliability_module` 随机初始化。
+- 预算：`max_epochs=1`，`limit_train_batches=64`，`limit_val_batches=16`。
+- batch size：`train_batch_size=8`，`val_batch_size=8`。
+- 配置：`fde_only + target_mode_rate(rho=0.67)`。
+- 日志目录：`/home/lbh/HiVT/runs/hivt_reliability/stage1_fix_budget64_fdeonly_targetmode067`。
+
+关键结果：
+
+```text
+train_mode_risk_target_rate     = 0.4386
+train_scene_risk_target_rate    = 0.4805
+train_conflict_risk_target_rate = 0.0007
+train_mode_risk_pred_mean       = 0.4569
+train_scene_risk_pred_mean      = 0.4815
+
+val_mode_risk_target_rate       = 0.4571
+val_scene_risk_target_rate      = 0.3359
+val_conflict_risk_target_rate   = 0.0007
+val_mode_risk_pred_mean         = 0.5314
+val_scene_risk_pred_mean        = 0.4160
+
+val_mode_AUROC                  = 0.8522
+val_mode_AUPRC                  = 0.7964
+val_mode_BrierScore             = 0.1592
+val_mode_ECE                    = 0.0691
+
+val_minADE                      = 0.6223
+val_minFDE                      = 0.9509
+val_minMR                       = 0.0703
+```
+
+阶段性结论：
+
+1. 标签塌缩已经解除。`mode / scene / conflict` 三类标签都处于可解释区间。
+2. `mode` 风险监督具备明显判别性，`AUROC=0.8522`、`AUPRC=0.7964`。
+3. risk prediction 没有继续塌缩到全 1。
+4. 当前阶段可以说 reliability supervision 已恢复有效，但还不能宣称插件显著提升预测精度。
+
+### 21.5 更完整小预算对照
+
+为确认上述结果不是 `64/16` 小样本偶然现象，进一步使用相同推荐配置进行 `128/32` 小预算复验。
+
+实验设置：
+
+- 宿主 checkpoint：`/home/lbh/HiVT/checkpoints/HiVT-64/checkpoints/epoch=63-step=411903.ckpt`
+- Baseline：直接验证宿主 `HiVT-64` checkpoint。
+- Plugin：宿主 checkpoint 初始化 backbone，`reliability_module` 随机初始化。
+- Plugin 训练预算：`max_epochs=1`，`limit_train_batches=128`，`limit_val_batches=32`。
+- Baseline 验证预算：`limit_val_batches=32`。
+- batch size：`train_batch_size=8`，`val_batch_size=8`。
+- Plugin 配置：`fde_only + target_mode_rate(rho=0.67)`。
+- Plugin 日志目录：`/home/lbh/HiVT/runs/hivt_reliability/stage1_fix_budget128_fdeonly_targetmode067`。
+
+Baseline 结果：
+
+```text
+val_reg_loss = -0.3638
+val_minADE   = 0.5738
+val_minFDE   = 0.8031
+val_minMR    = 0.0508
+```
+
+Plugin 结果：
+
+```text
+val_reg_loss                  = -0.2850
+val_minADE                    = 0.6110
+val_minFDE                    = 0.8664
+val_minMR                     = 0.0703
+
+val_mode_risk_target_rate     = 0.4591
+val_scene_risk_target_rate    = 0.3945
+val_conflict_risk_target_rate = 0.0007
+val_mode_risk_pred_mean       = 0.4738
+val_scene_risk_pred_mean      = 0.6350
+
+val_mode_AUROC                = 0.8735
+val_mode_AUPRC                = 0.8358
+val_mode_BrierScore           = 0.1445
+val_mode_ECE                  = 0.0302
+```
+
+对照结论：
+
+1. 标签修复效果在更大的小预算设置下仍稳定，`mode / scene / conflict` 标签均处于可解释区间。
+2. 可靠性判别能力进一步增强：
+   - `AUROC: 0.8522 -> 0.8735`
+   - `AUPRC: 0.7964 -> 0.8358`
+   - `ECE: 0.0691 -> 0.0302`
+3. 当前 plugin 联合训练会轻微牺牲宿主原始预测指标：
+   - `minADE: 0.5738 -> 0.6110`
+   - `minFDE: 0.8031 -> 0.8664`
+   - `MR: 0.0508 -> 0.0703`
+
+因此当前阶段的结论应调整为：
+
+```text
+标签协议修复已经成功，可靠性监督恢复可判别性；但在当前联合训练设置下，插件尚未证明能提升宿主预测精度，下一步应优先做 reranking-only 或冻结 backbone 的对照，避免 reliability loss 干扰已经训练好的预测主干。
+```
+
+后续优先级：
+
+1. 冻结 HiVT backbone，只训练 `reliability_module`。
+2. 单独评估 `original pi` 与 `reranked_pi`，验证 risk-aware reranking 是否改善 `minFDE / MR`。
+3. 在确认不破坏宿主预测指标后，再进入 shift evaluation 和更大预算实验。

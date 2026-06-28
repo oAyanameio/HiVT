@@ -17,6 +17,7 @@ compute_scene_risk_targets = reliability_module.compute_scene_risk_targets
 compute_conflict_risk_targets = reliability_module.compute_conflict_risk_targets
 compute_offroad_risk_targets = reliability_module.compute_offroad_risk_targets
 build_reliability_targets = reliability_module.build_reliability_targets
+predictions_to_scene_abs = reliability_module.predictions_to_scene_abs
 reconstruct_lane_positions = reliability_module.reconstruct_lane_positions
 summarize_reliability_targets = reliability_module.summarize_reliability_targets
 
@@ -51,7 +52,14 @@ def test_compute_mode_and_scene_risk_targets_from_terminal_error():
         reg_mask=reg_mask,
         fde_threshold=1.0,
     )
-    scene_targets = compute_scene_risk_targets(mode_targets=mode_targets, batch=batch, valid_mask=valid_mask)
+    scene_targets = compute_scene_risk_targets(
+        mode_targets=mode_targets,
+        batch=batch,
+        valid_mask=valid_mask,
+        fde=fde,
+        agent_index=torch.tensor([0, 2]),
+        policy="target_best_mode_fail",
+    )
 
     assert valid_mask.tolist() == [True, True, False]
     assert mode_targets.tolist() == [
@@ -61,35 +69,63 @@ def test_compute_mode_and_scene_risk_targets_from_terminal_error():
     ]
     assert fde[0, 1].item() == 2.0
     assert fde[1, 2].item() == 1.5
-    assert scene_targets.tolist() == [1.0, 0.0]
+    assert scene_targets.tolist() == [0.0, 0.0]
 
 
-def test_compute_conflict_risk_targets_flags_close_future_pairs():
+def test_compute_conflict_risk_targets_target_to_neighbors_uses_same_time_gt_future():
     y_hat = torch.zeros(2, 2, 3, 2)
     reg_mask = torch.tensor([
         [True, True, True],
         [True, True, True],
     ])
     batch = torch.tensor([0, 0])
+    positions = torch.tensor([
+        [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.2, 0.0], [0.4, 0.0]],
+        [[0.0, 0.4], [0.0, 0.4], [0.0, 0.4], [0.2, 0.4], [0.4, 0.4]],
+    ])
 
-    y_hat[0, 0] = torch.tensor([[0.0, 0.0], [0.2, 0.0], [0.3, 0.0]])
-    y_hat[0, 1] = torch.tensor([[0.0, 1.0], [0.2, 0.1], [0.3, 0.1]])
-    y_hat[1, 0] = torch.tensor([[0.0, 0.0], [4.0, 0.0], [8.0, 0.0]])
-    y_hat[1, 1] = torch.tensor([[0.0, 6.0], [4.0, 6.0], [8.0, 6.0]])
+    y_hat[0, 0] = torch.tensor([[0.0, 0.0], [0.2, 0.0], [0.4, 0.0]])
+    y_hat[1, 0] = torch.tensor([[3.0, 0.0], [3.2, 0.0], [3.4, 0.0]])
 
     conflict_targets, min_pair_dist = compute_conflict_risk_targets(
         y_hat=y_hat,
         reg_mask=reg_mask,
         batch=batch,
+        positions=positions,
+        historical_steps=2,
+        agent_index=torch.tensor([0]),
         conflict_threshold=0.5,
+        min_frames=2,
+        scope="target_to_neighbors",
     )
 
     assert conflict_targets.tolist() == [
         [1.0, 0.0],
-        [1.0, 0.0],
+        [0.0, 0.0],
     ]
     assert min_pair_dist[0, 0].item() < 0.5
     assert min_pair_dist[0, 1].item() > 1.0
+
+
+def test_compute_scene_risk_targets_target_mode_rate_uses_target_actor_only():
+    mode_targets = torch.tensor([
+        [0.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 0.0, 1.0],
+    ])
+    valid_mask = torch.tensor([True, True, True])
+    batch = torch.tensor([0, 0, 1])
+
+    scene_targets = compute_scene_risk_targets(
+        mode_targets=mode_targets,
+        batch=batch,
+        valid_mask=valid_mask,
+        agent_index=torch.tensor([0, 2]),
+        policy="target_mode_rate",
+        rate_threshold=0.5,
+    )
+
+    assert scene_targets.tolist() == [1.0, 0.0]
 
 
 def test_compute_offroad_risk_targets_flags_modes_far_from_lane_support():
@@ -138,7 +174,7 @@ def test_compute_offroad_risk_targets_flags_modes_far_from_lane_support():
     assert lane_distance[0, 1].item() > 2.5
 
 
-def test_build_reliability_targets_combines_fde_conflict_and_offroad():
+def test_build_reliability_targets_uses_fde_only_and_target_best_mode_fail():
     y_hat = torch.zeros(2, 2, 3, 2)
     y = torch.zeros(2, 3, 2)
     reg_mask = torch.tensor([
@@ -146,6 +182,10 @@ def test_build_reliability_targets_combines_fde_conflict_and_offroad():
         [True, True, True],
     ])
     batch = torch.tensor([0, 0])
+    positions = torch.tensor([
+        [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.2, 0.0], [0.4, 0.0]],
+        [[0.0, 0.4], [0.0, 0.4], [0.0, 0.4], [0.2, 0.4], [0.4, 0.4]],
+    ])
     lane_positions = torch.tensor([
         [0.0, 0.0],
         [1.0, 0.0],
@@ -162,7 +202,7 @@ def test_build_reliability_targets_combines_fde_conflict_and_offroad():
     ])
 
     y_hat[0, 0] = torch.tensor([[0.0, 0.0], [0.1, 0.0], [0.2, 0.0]])
-    y_hat[0, 1] = torch.tensor([[0.0, 0.3], [0.1, 0.3], [0.2, 0.3]])
+    y_hat[0, 1] = torch.tensor([[0.0, 0.4], [0.1, 0.4], [0.2, 0.4]])
     y_hat[1, 0] = torch.tensor([[3.0, 0.0], [4.0, 0.0], [5.0, 0.0]])
     y_hat[1, 1] = torch.tensor([[8.0, 0.0], [9.0, 0.0], [10.0, 0.0]])
 
@@ -174,14 +214,22 @@ def test_build_reliability_targets_combines_fde_conflict_and_offroad():
         lane_positions=lane_positions,
         lane_actor_index=lane_actor_index,
         lane_actor_vectors=lane_actor_vectors,
+        positions=positions,
+        historical_steps=2,
+        agent_index=torch.tensor([0]),
         fde_threshold=1.0,
         conflict_threshold=0.5,
         offroad_threshold=2.0,
+        miss_threshold=4.0,
+        mode_target_policy="fde_only",
+        scene_target_policy="target_best_mode_fail",
+        conflict_scope="target_to_neighbors",
+        conflict_min_frames=2,
     )
 
     assert outputs["mode_targets"].tolist() == [
-        [1.0, 1.0],
-        [1.0, 1.0],
+        [0.0, 1.0],
+        [0.0, 1.0],
     ]
     assert outputs["fde_targets"].tolist() == [
         [0.0, 1.0],
@@ -189,13 +237,13 @@ def test_build_reliability_targets_combines_fde_conflict_and_offroad():
     ]
     assert outputs["conflict_targets"].tolist() == [
         [1.0, 0.0],
-        [1.0, 0.0],
+        [0.0, 0.0],
     ]
     assert outputs["offroad_targets"].tolist() == [
         [0.0, 0.0],
         [0.0, 1.0],
     ]
-    assert outputs["scene_targets"].tolist() == [1.0]
+    assert outputs["scene_targets"].tolist() == [0.0]
 
 
 def test_summarize_reliability_targets_reports_component_positive_rates():
@@ -210,6 +258,16 @@ def test_summarize_reliability_targets_reports_component_positive_rates():
             [1.0, 0.0],
             [1.0, 1.0],
         ]),
+        "ade_targets": torch.tensor([
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ]),
+        "miss_targets": torch.tensor([
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ]),
         "conflict_targets": torch.tensor([
             [1.0, 0.0],
             [0.0, 1.0],
@@ -222,15 +280,35 @@ def test_summarize_reliability_targets_reports_component_positive_rates():
         ]),
         "scene_targets": torch.tensor([1.0, 0.0]),
         "valid_mask": torch.tensor([True, True, False]),
+        "agent_index": torch.tensor([0]),
+        "fde": torch.tensor([
+            [2.0, 0.2],
+            [3.0, 1.0],
+            [0.0, 0.0],
+        ]),
+        "min_pair_dist": torch.tensor([
+            [0.1, 0.3],
+            [1.1, 2.0],
+            [float("inf"), float("inf")],
+        ]),
     }
 
     stats = summarize_reliability_targets(targets)
 
     assert stats["mode_positive_rate"].item() == 0.75
     assert stats["fde_positive_rate"].item() == 0.25
+    assert stats["ade_positive_rate"].item() == 0.75
+    assert stats["miss_positive_rate"].item() == 0.5
     assert stats["conflict_positive_rate"].item() == 0.5
     assert stats["offroad_positive_rate"].item() == 0.25
     assert stats["scene_positive_rate"].item() == 0.5
+    assert stats["target_actor_mode_positive_rate"].item() == 0.5
+    assert stats["non_target_actor_mode_positive_rate"].item() == 1.0
+    assert stats["target_best_mode_fail_rate"].item() == 0.0
+    assert stats["scene_count"].item() == 2.0
+    assert stats["actor_count"].item() == 3.0
+    assert stats["valid_actor_count"].item() == 2.0
+    assert stats["min_pair_dist_q50"].item() > 0.2
 
 
 def test_reconstruct_lane_positions_from_lane_actor_vectors():

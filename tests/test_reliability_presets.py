@@ -15,10 +15,16 @@ def test_build_reliability_train_args_enables_reliability_flags():
     assert args["embed_dim"] == 64
     assert args["use_reliability"] is True
     assert args["reliability_hidden_dim"] == 128
-    assert args["reliability_rerank_alpha"] == 0.5
+    assert args["reliability_rerank_alpha"] == 0.0
     assert args["reliability_loss_weight"] == 1.0
-    assert args["scene_loss_weight"] == 0.5
+    assert args["scene_loss_weight"] == 0.2
     assert args["risk_fde_threshold"] == 2.0
+    assert args["risk_miss_threshold"] == 4.0
+    assert args["mode_target_policy"] == "fde_only"
+    assert args["scene_target_policy"] == "target_best_mode_fail"
+    assert args["risk_conflict_min_frames"] == 2
+    assert args["risk_conflict_scope"] == "target_to_neighbors"
+    assert args["risk_scene_rate_threshold"] == 0.5
 
 
 def test_build_reliability_train_args_accepts_overrides():
@@ -29,6 +35,12 @@ def test_build_reliability_train_args_accepts_overrides():
         reliability_loss_weight=1.5,
         scene_loss_weight=0.7,
         risk_fde_threshold=1.2,
+        risk_miss_threshold=5.0,
+        mode_target_policy="miss_only",
+        scene_target_policy="target_mode_rate",
+        risk_conflict_min_frames=3,
+        risk_conflict_scope="all_valid_pairs",
+        risk_scene_rate_threshold=0.3,
     )
 
     assert args["embed_dim"] == 128
@@ -37,3 +49,9 @@ def test_build_reliability_train_args_accepts_overrides():
     assert args["reliability_loss_weight"] == 1.5
     assert args["scene_loss_weight"] == 0.7
     assert args["risk_fde_threshold"] == 1.2
+    assert args["risk_miss_threshold"] == 5.0
+    assert args["mode_target_policy"] == "miss_only"
+    assert args["scene_target_policy"] == "target_mode_rate"
+    assert args["risk_conflict_min_frames"] == 3
+    assert args["risk_conflict_scope"] == "all_valid_pairs"
+    assert args["risk_scene_rate_threshold"] == 0.3
