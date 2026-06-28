@@ -14,6 +14,8 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "analyze_reliabi
 SPEC = importlib.util.spec_from_file_location("reliability_analysis_module", MODULE_PATH)
 RERANK_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eval_reranking.py"
 RERANK_SPEC = importlib.util.spec_from_file_location("reranking_eval_module", RERANK_MODULE_PATH)
+CONFLICT_AUDIT_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "audit_conflict_thresholds.py"
+CONFLICT_AUDIT_SPEC = importlib.util.spec_from_file_location("conflict_audit_module", CONFLICT_AUDIT_MODULE_PATH)
 
 
 def _load_module():
@@ -27,6 +29,13 @@ def _load_rerank_module():
     module = importlib.util.module_from_spec(RERANK_SPEC)
     assert RERANK_SPEC.loader is not None
     RERANK_SPEC.loader.exec_module(module)
+    return module
+
+
+def _load_conflict_audit_module():
+    module = importlib.util.module_from_spec(CONFLICT_AUDIT_SPEC)
+    assert CONFLICT_AUDIT_SPEC.loader is not None
+    CONFLICT_AUDIT_SPEC.loader.exec_module(module)
     return module
 
 
@@ -136,3 +145,10 @@ def test_summarize_reranking_cases_tracks_unchanged_cases_separately():
     assert summary["still_miss_unchanged_count"] == 1
     assert summary["still_hit_worsened_count"] == 1
     assert summary["still_miss_worsened_count"] == 1
+
+
+def test_summarize_positive_rate_returns_fraction():
+    module = _load_conflict_audit_module()
+    values = torch.tensor([0.0, 1.0, 1.0, 0.0])
+    rate = module.summarize_positive_rate(values)
+    assert float(rate) == 0.5
