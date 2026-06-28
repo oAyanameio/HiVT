@@ -1,0 +1,3 @@
+run,val_minADE,val_minFDE,val_minMR,val_mode_AUROC,val_mode_AUPRC,val_mode_BrierScore,val_mode_ECE,val_risk_loss,val_scene_loss,val_mode_risk_target_rate,val_scene_risk_target_rate,val_mode_risk_pred_mean,val_scene_risk_pred_mean,val_fde_risk_target_rate,val_ade_risk_target_rate,val_miss_risk_target_rate,val_conflict_risk_target_rate,val_offroad_risk_target_rate
+stage1_fix_budget64_fdeonly_targetmode067,0.622291,0.950928,0.0703125,0.852163,0.796411,0.159168,0.0691175,0.478258,0.646788,0.45711,0.335938,0.531409,0.415996,0.45711,0.456845,0.261163,0.000723963,0.230842
+stage1_fix_budget128_fdeonly_targetmode067,0.610951,0.866362,0.0703125,0.873523,0.835783,0.144478,0.0301806,0.43723,0.788139,0.459108,0.394531,0.473831,0.634967,0.459108,0.456631,0.264216,0.000677719,0.223118
