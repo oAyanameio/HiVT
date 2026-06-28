@@ -23,6 +23,7 @@ from losses import RiskCalibrationLoss
 from losses import RiskRankLoss
 from losses import SoftTargetCrossEntropyLoss
 from metrics import ADE
+from metrics import AUPRC
 from metrics import AUROC
 from metrics import BrierScore
 from metrics import ECE
@@ -76,6 +77,12 @@ class HiVT(pl.LightningModule):
                  risk_fde_threshold: float,
                  risk_conflict_threshold: float,
                  risk_offroad_threshold: float,
+                 risk_miss_threshold: float,
+                 mode_target_policy: str,
+                 scene_target_policy: str,
+                 risk_conflict_min_frames: int,
+                 risk_conflict_scope: str,
+                 risk_scene_rate_threshold: float,
                  lr: float,
                  weight_decay: float,
                  T_max: int,
@@ -116,6 +123,12 @@ class HiVT(pl.LightningModule):
         self.risk_fde_threshold = risk_fde_threshold
         self.risk_conflict_threshold = risk_conflict_threshold
         self.risk_offroad_threshold = risk_offroad_threshold
+        self.risk_miss_threshold = risk_miss_threshold
+        self.mode_target_policy = mode_target_policy
+        self.scene_target_policy = scene_target_policy
+        self.risk_conflict_min_frames = risk_conflict_min_frames
+        self.risk_conflict_scope = risk_conflict_scope
+        self.risk_scene_rate_threshold = risk_scene_rate_threshold
         self.lr = lr
         self.weight_decay = weight_decay
         self.T_max = T_max
@@ -160,6 +173,7 @@ class HiVT(pl.LightningModule):
         self.minMR = MR()
         if use_reliability:
             self.mode_risk_auroc = AUROC(compute_on_step=False)
+            self.mode_risk_auprc = AUPRC(compute_on_step=False)
             self.mode_risk_brier = BrierScore()
             self.mode_risk_ece = ECE()
 
@@ -251,9 +265,19 @@ class HiVT(pl.LightningModule):
                 lane_positions=lane_positions,
                 lane_actor_index=data['lane_actor_index'],
                 lane_actor_vectors=data['lane_actor_vectors'],
+                positions=data['positions'],
+                historical_steps=self.historical_steps,
+                rotate_mat=data['rotate_mat'],
+                agent_index=data['agent_index'],
                 fde_threshold=self.risk_fde_threshold,
                 conflict_threshold=self.risk_conflict_threshold,
                 offroad_threshold=self.risk_offroad_threshold,
+                miss_threshold=self.risk_miss_threshold,
+                mode_target_policy=self.mode_target_policy,
+                scene_target_policy=self.scene_target_policy,
+                conflict_scope=self.risk_conflict_scope,
+                conflict_min_frames=self.risk_conflict_min_frames,
+                scene_rate_threshold=self.risk_scene_rate_threshold,
             )
             mode_targets = reliability_targets['mode_targets']
             valid_mask = reliability_targets['valid_mask']
@@ -287,6 +311,8 @@ class HiVT(pl.LightningModule):
             self.log('train_scene_loss', scene_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
             self.log('train_mode_risk_target_rate', risk_stats['mode_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
             self.log('train_fde_risk_target_rate', risk_stats['fde_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_ade_risk_target_rate', risk_stats['ade_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
+            self.log('train_miss_risk_target_rate', risk_stats['miss_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
             self.log('train_conflict_risk_target_rate', risk_stats['conflict_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
             self.log('train_offroad_risk_target_rate', risk_stats['offroad_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
             self.log('train_scene_risk_target_rate', risk_stats['scene_positive_rate'], prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
@@ -342,9 +368,19 @@ class HiVT(pl.LightningModule):
                 lane_positions=lane_positions,
                 lane_actor_index=data['lane_actor_index'],
                 lane_actor_vectors=data['lane_actor_vectors'],
+                positions=data['positions'],
+                historical_steps=self.historical_steps,
+                rotate_mat=data['rotate_mat'],
+                agent_index=data['agent_index'],
                 fde_threshold=self.risk_fde_threshold,
                 conflict_threshold=self.risk_conflict_threshold,
                 offroad_threshold=self.risk_offroad_threshold,
+                miss_threshold=self.risk_miss_threshold,
+                mode_target_policy=self.mode_target_policy,
+                scene_target_policy=self.scene_target_policy,
+                conflict_scope=self.risk_conflict_scope,
+                conflict_min_frames=self.risk_conflict_min_frames,
+                scene_rate_threshold=self.risk_scene_rate_threshold,
             )
             mode_targets = reliability_targets['mode_targets']
             valid_mask = reliability_targets['valid_mask']
@@ -360,6 +396,8 @@ class HiVT(pl.LightningModule):
             risk_stats = summarize_reliability_targets(reliability_targets)
             self.log('val_mode_risk_target_rate', risk_stats['mode_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             self.log('val_fde_risk_target_rate', risk_stats['fde_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_ade_risk_target_rate', risk_stats['ade_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
+            self.log('val_miss_risk_target_rate', risk_stats['miss_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             self.log('val_conflict_risk_target_rate', risk_stats['conflict_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             self.log('val_offroad_risk_target_rate', risk_stats['offroad_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             self.log('val_scene_risk_target_rate', risk_stats['scene_positive_rate'], prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
@@ -368,9 +406,11 @@ class HiVT(pl.LightningModule):
                 self.log('val_scene_risk_pred_mean', reliability_outputs['scene_risk'].mean(), prog_bar=False, on_step=False, on_epoch=True, batch_size=1)
             if valid_mask.any():
                 self.mode_risk_auroc.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
+                self.mode_risk_auprc.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
                 self.mode_risk_brier.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
                 self.mode_risk_ece.update(reliability_outputs['mode_risk'][valid_mask], mode_targets[valid_mask])
                 self.log('val_mode_AUROC', self.mode_risk_auroc, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
+                self.log('val_mode_AUPRC', self.mode_risk_auprc, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
                 self.log('val_mode_BrierScore', self.mode_risk_brier, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
                 self.log('val_mode_ECE', self.mode_risk_ece, prog_bar=False, on_step=False, on_epoch=True, batch_size=int(valid_mask.sum().item()))
 
@@ -441,14 +481,23 @@ class HiVT(pl.LightningModule):
         parser.add_argument('--parallel', type=bool, default=False)
         parser.add_argument('--use_reliability', type=bool, default=False)
         parser.add_argument('--reliability_hidden_dim', type=int, default=128)
-        parser.add_argument('--reliability_rerank_alpha', type=float, default=0.5)
+        parser.add_argument('--reliability_rerank_alpha', type=float, default=0.0)
         parser.add_argument('--reliability_loss_weight', type=float, default=1.0)
-        parser.add_argument('--scene_loss_weight', type=float, default=0.5)
+        parser.add_argument('--scene_loss_weight', type=float, default=0.2)
         parser.add_argument('--rank_loss_weight', type=float, default=0.0)
         parser.add_argument('--calib_loss_weight', type=float, default=0.0)
         parser.add_argument('--risk_fde_threshold', type=float, default=2.0)
-        parser.add_argument('--risk_conflict_threshold', type=float, default=2.0)
+        parser.add_argument('--risk_miss_threshold', type=float, default=4.0)
+        parser.add_argument('--risk_conflict_threshold', type=float, default=1.0)
+        parser.add_argument('--risk_conflict_min_frames', type=int, default=2)
         parser.add_argument('--risk_offroad_threshold', type=float, default=2.0)
+        parser.add_argument('--risk_scene_rate_threshold', type=float, default=0.5)
+        parser.add_argument('--mode_target_policy', type=str, default='fde_only',
+                            choices=['fde_only', 'miss_only', 'fde_or_miss', 'all_union'])
+        parser.add_argument('--scene_target_policy', type=str, default='target_best_mode_fail',
+                            choices=['target_best_mode_fail', 'target_mode_rate', 'scene_rate', 'scene_max'])
+        parser.add_argument('--risk_conflict_scope', type=str, default='target_to_neighbors',
+                            choices=['target_to_neighbors', 'all_valid_pairs'])
         parser.add_argument('--lr', type=float, default=5e-4)
         parser.add_argument('--weight_decay', type=float, default=1e-4)
         parser.add_argument('--T_max', type=int, default=64)

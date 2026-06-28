@@ -4,14 +4,20 @@ from typing import Any, Dict
 def build_reliability_train_args(
     embed_dim: int,
     reliability_hidden_dim: int = 128,
-    reliability_rerank_alpha: float = 0.5,
+    reliability_rerank_alpha: float = 0.0,
     reliability_loss_weight: float = 1.0,
-    scene_loss_weight: float = 0.5,
+    scene_loss_weight: float = 0.2,
     rank_loss_weight: float = 0.0,
     calib_loss_weight: float = 0.0,
     risk_fde_threshold: float = 2.0,
+    risk_miss_threshold: float = 4.0,
+    risk_conflict_min_frames: int = 2,
     risk_conflict_threshold: float = 2.0,
     risk_offroad_threshold: float = 2.0,
+    risk_scene_rate_threshold: float = 0.5,
+    mode_target_policy: str = "fde_only",
+    scene_target_policy: str = "target_best_mode_fail",
+    risk_conflict_scope: str = "target_to_neighbors",
     **overrides: Any,
 ) -> Dict[str, Any]:
     args: Dict[str, Any] = {
@@ -24,8 +30,14 @@ def build_reliability_train_args(
         "rank_loss_weight": rank_loss_weight,
         "calib_loss_weight": calib_loss_weight,
         "risk_fde_threshold": risk_fde_threshold,
+        "risk_miss_threshold": risk_miss_threshold,
+        "risk_conflict_min_frames": risk_conflict_min_frames,
         "risk_conflict_threshold": risk_conflict_threshold,
         "risk_offroad_threshold": risk_offroad_threshold,
+        "risk_scene_rate_threshold": risk_scene_rate_threshold,
+        "mode_target_policy": mode_target_policy,
+        "scene_target_policy": scene_target_policy,
+        "risk_conflict_scope": risk_conflict_scope,
     }
     args.update(overrides)
     return args

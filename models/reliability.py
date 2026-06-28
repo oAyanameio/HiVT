@@ -109,19 +109,116 @@ def compute_miss_risk_targets(
     return miss_targets, fde
 
 
+def _max_consecutive_true(flags: torch.Tensor) -> int:
+    """返回布尔序列中 True 的最长连续长度。"""
+    best = 0
+    run = 0
+    for flag in flags.tolist():
+        if flag:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return best
+
+
+def predictions_to_scene_abs(
+    y_hat: torch.Tensor,
+    positions: torch.Tensor,
+    historical_steps: int,
+    rotate_mat: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """把 per-actor 局部坐标系下的预测轨迹还原到共享 scene 绝对坐标系。
+
+    HiVT 在 `rotate=True` 时会把每个 actor 的 `y` / 预测旋转到其自身局部朝向坐标系，
+    不同 actor 处在不同坐标系下，直接做跨 actor 的距离比较在几何上是错误的。
+    本函数将预测先按 `rotate_mat^T` 旋回 scene 朝向，再加上当前帧绝对位置。
+
+    Args:
+        y_hat: [F, N, H, C]，最后维前 2 项为局部坐标系下、相对当前帧的位移。
+        positions: [N, T, 2]，scene 绝对坐标系下的完整轨迹（含历史与未来）。
+        historical_steps: 历史步数，当前帧索引为 `historical_steps - 1`。
+        rotate_mat: [N, 2, 2] 每个 actor 的旋转矩阵；`None` 表示未旋转。
+
+    Returns:
+        [F, N, H, 2] scene 绝对坐标系下的预测轨迹。
+    """
+    mode_xy = y_hat[..., :2]  # [F, N, H, 2]
+    if rotate_mat is not None:
+        # data.y_local = y_scene_rel @ R，因此 y_scene_rel = y_local @ R^T。
+        inv_rot = rotate_mat.transpose(-1, -2)  # [N, 2, 2]
+        scene_rel = torch.einsum("fnhc,ncd->fnhd", mode_xy, inv_rot)
+    else:
+        scene_rel = mode_xy
+    current = positions[:, historical_steps - 1]  # [N, 2]
+    return scene_rel + current.view(1, current.size(0), 1, 2)
+
+
 def compute_scene_risk_targets(
     mode_targets: torch.Tensor,
     batch: torch.Tensor,
     valid_mask: Optional[torch.Tensor] = None,
+    fde: Optional[torch.Tensor] = None,
+    agent_index: Optional[torch.Tensor] = None,
+    policy: str = "target_best_mode_fail",
+    rate_threshold: float = 0.5,
 ) -> torch.Tensor:
-    """把 node-level mode 风险聚合成 scene-level 风险（文档 9.2）。"""
+    """把 mode-level 风险聚合成 scene-level 风险（文档 6.4 / 9.2）。
+
+    支持的 `policy`：
+    - `target_best_mode_fail`：目标车 min-FDE（best）mode 是否失败。需要 `fde` 与
+      `agent_index`，与 HiVT 的 minFDE/MR 评估口径一致，不易被无关邻车污染。
+    - `target_mode_rate`：目标车正样本 mode 比例是否超过 `rate_threshold`。需要
+      `agent_index`。
+    - `scene_rate`：全场景高风险 mode 比例是否超过 `rate_threshold`（兼容旧逻辑）。
+    - `scene_max`：全场景任一 node/mode 为正即为正（旧的 hard-max，过激，不推荐）。
+
+    target-centric 策略缺少 `agent_index` 时直接报错，避免静默退化成全 actor 聚合。
+    """
     num_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
     scene_targets = torch.zeros(num_graphs, device=mode_targets.device)
+    if num_graphs == 0:
+        return scene_targets
+
+    if policy in ("target_best_mode_fail", "target_mode_rate"):
+        if agent_index is None:
+            raise ValueError(
+                "scene policy '{}' requires agent_index (target actor 全局索引)".format(policy))
+        agent_index = agent_index.view(-1)
+        for graph_idx in range(num_graphs):
+            if graph_idx >= agent_index.numel():
+                continue
+            target = int(agent_index[graph_idx].item())
+            if valid_mask is not None and not bool(valid_mask[target]):
+                scene_targets[graph_idx] = 0.0
+                continue
+            if policy == "target_best_mode_fail":
+                if fde is None:
+                    raise ValueError("scene policy 'target_best_mode_fail' requires fde")
+                best_mode = int(fde[target].argmin().item())
+                scene_targets[graph_idx] = mode_targets[target, best_mode]
+            else:  # target_mode_rate
+                rate = mode_targets[target].mean()
+                scene_targets[graph_idx] = (rate > rate_threshold).float()
+        return scene_targets
+
+    # 全场景聚合（兼容旧逻辑）。
     node_risk = mode_targets.max(dim=-1).values
     if valid_mask is not None:
         node_risk = node_risk * valid_mask.float()
     for graph_idx in range(num_graphs):
-        scene_targets[graph_idx] = node_risk[batch == graph_idx].max() if (batch == graph_idx).any() else 0.0
+        node_mask = batch == graph_idx
+        if not node_mask.any():
+            continue
+        if policy == "scene_rate":
+            graph_modes = mode_targets[node_mask]
+            if valid_mask is not None:
+                graph_valid = valid_mask[node_mask]
+                graph_modes = graph_modes[graph_valid]
+            rate = graph_modes.mean() if graph_modes.numel() > 0 else node_risk.new_zeros(())
+            scene_targets[graph_idx] = (rate > rate_threshold).float()
+        else:  # scene_max
+            scene_targets[graph_idx] = node_risk[node_mask].max()
     return scene_targets
 
 
@@ -129,16 +226,78 @@ def compute_conflict_risk_targets(
     y_hat: torch.Tensor,
     reg_mask: torch.Tensor,
     batch: torch.Tensor,
+    positions: torch.Tensor,
+    historical_steps: int,
+    rotate_mat: Optional[torch.Tensor] = None,
+    agent_index: Optional[torch.Tensor] = None,
     conflict_threshold: float = 1.0,
+    min_frames: int = 2,
+    scope: str = "target_to_neighbors",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """基于预测轨迹之间的最小距离构造 conflict 风险标签（文档 9.1）。"""
+    """构造 conflict 风险标签（文档 6.2）。
+
+    第一版默认 `scope='target_to_neighbors'`：
+    - 取目标车（`agent_index`）的第 k 条预测 future（还原到 scene 绝对坐标系）；
+    - 与同 scene 下每个有效邻车的 GT future 做同一时间步距离比较；
+    - 仅在双方 future mask 同时有效的步上计算；
+    - 若某邻车的连续接近帧数 >= `min_frames`，则该 mode 记为 conflict。
+
+    `scope='all_valid_pairs'` 保留旧的“预测 vs 预测最小距离”定义，仅供诊断，
+    极易在密集交通场景把 conflict 标签打满。
+
+    Returns:
+        `(conflict_targets, min_pair_dist)`，均为 [N, F]。
+    """
     mode_xy = y_hat[..., :2]
     num_modes, num_nodes, future_steps, _ = mode_xy.shape
     conflict_targets = torch.zeros(num_nodes, num_modes, device=y_hat.device)
     min_pair_dist = torch.full((num_nodes, num_modes), float("inf"), device=y_hat.device)
     valid_nodes = reg_mask.any(dim=-1)
+    num_graphs = int(batch.max().item()) + 1 if batch.numel() > 0 else 0
+    if num_graphs == 0:
+        return conflict_targets, min_pair_dist
 
-    for graph_idx in range(int(batch.max().item()) + 1 if batch.numel() > 0 else 0):
+    if scope == "target_to_neighbors":
+        if agent_index is None:
+            raise ValueError("conflict scope 'target_to_neighbors' requires agent_index")
+        agent_index = agent_index.view(-1)
+        pred_abs = predictions_to_scene_abs(
+            y_hat=y_hat, positions=positions, historical_steps=historical_steps, rotate_mat=rotate_mat)
+        gt_future = positions[:, historical_steps:historical_steps + future_steps]  # [N, H, 2]
+        for graph_idx in range(num_graphs):
+            if graph_idx >= agent_index.numel():
+                continue
+            target = int(agent_index[graph_idx].item())
+            if not bool(valid_nodes[target]):
+                continue
+            node_mask = batch == graph_idx
+            neighbor_idx = torch.nonzero(node_mask, as_tuple=False).flatten()
+            neighbor_idx = neighbor_idx[neighbor_idx != target]
+            neighbor_idx = neighbor_idx[valid_nodes[neighbor_idx]]
+            if neighbor_idx.numel() == 0:
+                continue
+            target_valid = reg_mask[target]  # [H]
+            neigh_gt = gt_future[neighbor_idx]  # [M, H, 2]
+            neigh_valid = reg_mask[neighbor_idx]  # [M, H]
+            for mode_idx in range(num_modes):
+                traj = pred_abs[mode_idx, target]  # [H, 2]
+                dist = torch.norm(traj.unsqueeze(0) - neigh_gt, p=2, dim=-1)  # [M, H]
+                joint_valid = target_valid.unsqueeze(0) & neigh_valid  # [M, H]
+                masked_dist = dist.masked_fill(~joint_valid, float("inf"))
+                if torch.isfinite(masked_dist).any():
+                    min_pair_dist[target, mode_idx] = masked_dist.min()
+                close = (dist < conflict_threshold) & joint_valid  # [M, H]
+                hit = False
+                for m in range(neighbor_idx.numel()):
+                    if _max_consecutive_true(close[m]) >= min_frames:
+                        hit = True
+                        break
+                conflict_targets[target, mode_idx] = float(hit)
+        conflict_targets = conflict_targets * valid_nodes.unsqueeze(-1).float()
+        return conflict_targets, min_pair_dist
+
+    # 旧的全场景预测两两比较（all_valid_pairs），仅作诊断。
+    for graph_idx in range(num_graphs):
         node_indices = torch.nonzero(batch == graph_idx, as_tuple=False).flatten()
         if node_indices.numel() < 2:
             continue
@@ -217,16 +376,33 @@ def build_reliability_targets(
     lane_positions: torch.Tensor,
     lane_actor_index: torch.Tensor,
     lane_actor_vectors: torch.Tensor,
+    positions: Optional[torch.Tensor] = None,
+    historical_steps: int = 20,
+    rotate_mat: Optional[torch.Tensor] = None,
+    agent_index: Optional[torch.Tensor] = None,
     fde_threshold: float = 1.0,
     conflict_threshold: float = 1.0,
     offroad_threshold: float = 2.0,
     ade_threshold: float = 1.0,
     miss_threshold: float = 2.0,
+    mode_target_policy: str = "fde_only",
+    scene_target_policy: str = "target_best_mode_fail",
+    conflict_scope: str = "target_to_neighbors",
+    conflict_min_frames: int = 2,
+    scene_rate_threshold: float = 0.5,
 ) -> Dict[str, torch.Tensor]:
-    """统一构造 mode / scene 可靠性监督信号（文档第 9 节）。
+    """统一构造 mode / scene 可靠性监督信号（文档第 6 / 9 节）。
 
-    综合标签为 FDE / ADE / miss / conflict / off-road 五类失败事件的并集：
-    `y_risk = max(y_fde, y_ade, y_miss, y_conflict, y_offroad)`。
+    本阶段不再默认使用五类标签并集，而是由 `mode_target_policy` 决定主 mode 监督：
+
+    - `fde_only`（默认）：`y_mode = 1(FDE_k > fde_threshold)`，语义清晰、口径与 minFDE 一致。
+    - `miss_only`：`y_mode = 1(FDE_k > miss_threshold)`，对应彻底 miss。
+    - `fde_or_miss`：FDE 失败或 miss 之一即为正（仅在阈值体检后启用）。
+    - `all_union`：旧的五类并集（FDE/ADE/miss/conflict/offroad），保留作对照，易塌缩。
+
+    `conflict` / `offroad` / `ade` 默认仅作为日志子标签返回，不进入主 `mode_targets`，
+    避免再次把主监督打满。scene 监督由 `scene_target_policy` 决定（见
+    `compute_scene_risk_targets`），默认 `target_best_mode_fail`。
 
     同时返回每个 mode 的连续位移误差 `mode_error`（[N, F]），供 rank loss 使用。
     """
@@ -248,11 +424,19 @@ def build_reliability_targets(
         reg_mask=reg_mask,
         miss_threshold=miss_threshold,
     )
+    if positions is None:
+        raise ValueError("build_reliability_targets 需要 positions 才能在 scene 绝对坐标系下计算 conflict")
     conflict_targets, min_pair_dist = compute_conflict_risk_targets(
         y_hat=y_hat,
         reg_mask=reg_mask,
         batch=batch,
+        positions=positions,
+        historical_steps=historical_steps,
+        rotate_mat=rotate_mat,
+        agent_index=agent_index,
         conflict_threshold=conflict_threshold,
+        min_frames=conflict_min_frames,
+        scope=conflict_scope,
     )
     offroad_targets, lane_distance = compute_offroad_risk_targets(
         y_hat=y_hat,
@@ -262,10 +446,30 @@ def build_reliability_targets(
         lane_actor_vectors=lane_actor_vectors,
         offroad_threshold=offroad_threshold,
     )
-    mode_targets = mode_targets_fde
-    for component in (ade_targets, miss_targets, conflict_targets, offroad_targets):
-        mode_targets = torch.maximum(mode_targets, component)
-    scene_targets = compute_scene_risk_targets(mode_targets=mode_targets, batch=batch, valid_mask=valid_mask)
+
+    # 主 mode 监督：按 policy 选择，默认 fde_only，避免子标签污染。
+    if mode_target_policy == "fde_only":
+        mode_targets = mode_targets_fde
+    elif mode_target_policy == "miss_only":
+        mode_targets = miss_targets
+    elif mode_target_policy == "fde_or_miss":
+        mode_targets = torch.maximum(mode_targets_fde, miss_targets)
+    elif mode_target_policy == "all_union":
+        mode_targets = mode_targets_fde
+        for component in (ade_targets, miss_targets, conflict_targets, offroad_targets):
+            mode_targets = torch.maximum(mode_targets, component)
+    else:
+        raise ValueError("unknown mode_target_policy: {}".format(mode_target_policy))
+
+    scene_targets = compute_scene_risk_targets(
+        mode_targets=mode_targets,
+        batch=batch,
+        valid_mask=valid_mask,
+        fde=fde,
+        agent_index=agent_index,
+        policy=scene_target_policy,
+        rate_threshold=scene_rate_threshold,
+    )
     return {
         "mode_targets": mode_targets,
         "fde_targets": mode_targets_fde,
@@ -280,6 +484,7 @@ def build_reliability_targets(
         "mode_error": ade,
         "min_pair_dist": min_pair_dist,
         "lane_distance": lane_distance,
+        "agent_index": agent_index if agent_index is None else agent_index.view(-1),
     }
 
 
@@ -306,6 +511,47 @@ def summarize_reliability_targets(targets: Dict[str, torch.Tensor]) -> Dict[str,
             stats[stat_key] = values.new_zeros(())
     scene_targets = targets["scene_targets"]
     stats["scene_positive_rate"] = scene_targets.float().mean() if scene_targets.numel() > 0 else scene_targets.new_zeros(())
+
+    # target / non-target actor 拆分，区分“主标签真的恢复可分”与“只是被邻车标签污染得不那么极端”。
+    mode_targets = targets["mode_targets"]
+    agent_index = targets.get("agent_index")
+    fde = targets.get("fde")
+    device = valid_mask.device
+    if agent_index is not None and agent_index.numel() > 0:
+        agent_index = agent_index.view(-1)
+        target_mask = torch.zeros(valid_mask.size(0), dtype=torch.bool, device=device)
+        target_mask[agent_index] = True
+        target_valid = target_mask & valid_mask
+        non_target_valid = (~target_mask) & valid_mask
+        if target_valid.any():
+            stats["target_actor_mode_positive_rate"] = mode_targets[target_valid].float().mean()
+            # target_best_mode_fail_rate：目标车 min-FDE mode 失败的比例。
+            if fde is not None:
+                valid_targets = agent_index[valid_mask[agent_index]]
+                if valid_targets.numel() > 0:
+                    best_modes = fde[valid_targets].argmin(dim=-1)
+                    best_fail = mode_targets[valid_targets, best_modes]
+                    stats["target_best_mode_fail_rate"] = best_fail.float().mean()
+                else:
+                    stats["target_best_mode_fail_rate"] = mode_targets.new_zeros(())
+        else:
+            stats["target_actor_mode_positive_rate"] = mode_targets.new_zeros(())
+            stats["target_best_mode_fail_rate"] = mode_targets.new_zeros(())
+        if non_target_valid.any():
+            stats["non_target_actor_mode_positive_rate"] = mode_targets[non_target_valid].float().mean()
+        else:
+            stats["non_target_actor_mode_positive_rate"] = mode_targets.new_zeros(())
+
+    # 计数与 min_pair_dist 分位数，便于挑选 tau_col。
+    stats["scene_count"] = torch.tensor(float(scene_targets.numel()), device=device)
+    stats["actor_count"] = torch.tensor(float(valid_mask.numel()), device=device)
+    stats["valid_actor_count"] = torch.tensor(float(valid_count), device=device)
+    min_pair_dist = targets.get("min_pair_dist")
+    if min_pair_dist is not None:
+        finite = min_pair_dist[torch.isfinite(min_pair_dist)]
+        if finite.numel() > 0:
+            for q in (0.1, 0.5, 0.9):
+                stats["min_pair_dist_q{}".format(int(q * 100))] = torch.quantile(finite, q)
     return stats
 def _trajectory_kinematic_features(y_hat: torch.Tensor) -> torch.Tensor:
     """从候选轨迹提取运动学/几何风险特征（文档 7.1）。
