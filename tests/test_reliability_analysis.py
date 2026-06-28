@@ -12,12 +12,21 @@ from metrics.reliability_metrics import ECE
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "analyze_reliability_baselines.py"
 SPEC = importlib.util.spec_from_file_location("reliability_analysis_module", MODULE_PATH)
+RERANK_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eval_reranking.py"
+RERANK_SPEC = importlib.util.spec_from_file_location("reranking_eval_module", RERANK_MODULE_PATH)
 
 
 def _load_module():
     module = importlib.util.module_from_spec(SPEC)
     assert SPEC.loader is not None
     SPEC.loader.exec_module(module)
+    return module
+
+
+def _load_rerank_module():
+    module = importlib.util.module_from_spec(RERANK_SPEC)
+    assert RERANK_SPEC.loader is not None
+    RERANK_SPEC.loader.exec_module(module)
     return module
 
 
@@ -65,3 +74,65 @@ def test_reranking_changes_top1_when_high_risk_mode_has_best_pi():
     reranked = torch.softmax(pi - risk * 2.0, dim=-1)
     assert int(pi.argmax(dim=-1)[0]) == 0
     assert int(reranked.argmax(dim=-1)[0]) == 1
+
+
+def test_probability_space_reranking_penalizes_high_risk_mode():
+    module = _load_rerank_module()
+    pi = torch.tensor([[3.0, 2.0]])
+    risk = torch.tensor([[0.9, 0.1]])
+    scores = module.rerank_scores(pi, risk, method="prob_product", alpha=1.0, top_k=None)
+    assert scores.shape == pi.shape
+    assert scores[0, 1] > scores[0, 0]
+
+
+def test_top_k_reranking_only_changes_candidates_inside_top_k():
+    module = _load_rerank_module()
+    pi = torch.tensor([[5.0, 4.0, 0.0]])
+    risk = torch.tensor([[0.9, 0.1, 0.0]])
+    scores = module.rerank_scores(pi, risk, method="prob_product", alpha=1.0, top_k=2)
+    assert scores[0, 2] < scores[0, 1]
+
+
+def test_probability_space_reranking_alpha_zero_reduces_to_log_softmax():
+    module = _load_rerank_module()
+    pi = torch.tensor([[2.0, 1.0]])
+    risk = torch.tensor([[0.9, 0.1]])
+    scores = module.rerank_scores(pi, risk, method="prob_product", alpha=0.0, top_k=None)
+    assert torch.allclose(scores, torch.log_softmax(pi, dim=-1), atol=1e-6)
+
+
+def test_summarize_reranking_cases_separates_threshold_crossings():
+    module = _load_rerank_module()
+    original_fde = torch.tensor([1.0, 2.5, 2.8, 1.8])
+    reranked_fde = torch.tensor([2.2, 1.9, 2.1, 1.2])
+    summary = module.summarize_reranking_cases(
+        original_fde=original_fde,
+        reranked_fde=reranked_fde,
+        miss_threshold=2.0,
+    )
+
+    assert summary["count"] == 4
+    assert math.isclose(summary["original_mr"], 0.5, abs_tol=1e-6)
+    assert math.isclose(summary["reranked_mr"], 0.5, abs_tol=1e-6)
+    assert summary["hit_to_miss_count"] == 1
+    assert summary["miss_to_hit_count"] == 1
+    assert summary["still_miss_improved_count"] == 1
+    assert summary["still_hit_improved_count"] == 1
+    assert summary["still_miss_worsened_count"] == 0
+    assert summary["still_hit_worsened_count"] == 0
+
+
+def test_summarize_reranking_cases_tracks_unchanged_cases_separately():
+    module = _load_rerank_module()
+    original_fde = torch.tensor([1.0, 2.5, 1.5, 3.0])
+    reranked_fde = torch.tensor([1.0, 2.5, 1.8, 3.2])
+    summary = module.summarize_reranking_cases(
+        original_fde=original_fde,
+        reranked_fde=reranked_fde,
+        miss_threshold=2.0,
+    )
+
+    assert summary["still_hit_unchanged_count"] == 1
+    assert summary["still_miss_unchanged_count"] == 1
+    assert summary["still_hit_worsened_count"] == 1
+    assert summary["still_miss_worsened_count"] == 1
