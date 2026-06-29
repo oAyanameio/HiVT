@@ -16,6 +16,10 @@ RERANK_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eval_rer
 RERANK_SPEC = importlib.util.spec_from_file_location("reranking_eval_module", RERANK_MODULE_PATH)
 CONFLICT_AUDIT_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "audit_conflict_thresholds.py"
 CONFLICT_AUDIT_SPEC = importlib.util.spec_from_file_location("conflict_audit_module", CONFLICT_AUDIT_MODULE_PATH)
+SCENE_CALIB_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "analyze_scene_calibration.py"
+SCENE_CALIB_SPEC = importlib.util.spec_from_file_location("scene_calibration_module", SCENE_CALIB_MODULE_PATH)
+JOINT_REGRESSION_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "analyze_joint_training_regression.py"
+JOINT_REGRESSION_SPEC = importlib.util.spec_from_file_location("joint_regression_module", JOINT_REGRESSION_MODULE_PATH)
 
 
 def _load_module():
@@ -36,6 +40,20 @@ def _load_conflict_audit_module():
     module = importlib.util.module_from_spec(CONFLICT_AUDIT_SPEC)
     assert CONFLICT_AUDIT_SPEC.loader is not None
     CONFLICT_AUDIT_SPEC.loader.exec_module(module)
+    return module
+
+
+def _load_scene_calib_module():
+    module = importlib.util.module_from_spec(SCENE_CALIB_SPEC)
+    assert SCENE_CALIB_SPEC.loader is not None
+    SCENE_CALIB_SPEC.loader.exec_module(module)
+    return module
+
+
+def _load_joint_regression_module():
+    module = importlib.util.module_from_spec(JOINT_REGRESSION_SPEC)
+    assert JOINT_REGRESSION_SPEC.loader is not None
+    JOINT_REGRESSION_SPEC.loader.exec_module(module)
     return module
 
 
@@ -152,3 +170,49 @@ def test_summarize_positive_rate_returns_fraction():
     values = torch.tensor([0.0, 1.0, 1.0, 0.0])
     rate = module.summarize_positive_rate(values)
     assert float(rate) == 0.5
+
+
+def test_bucketize_binary_calibration_returns_counts_and_rates():
+    module = _load_scene_calib_module()
+    probs = torch.tensor([0.1, 0.2, 0.8, 0.9])
+    targets = torch.tensor([0.0, 0.0, 1.0, 1.0])
+    rows = module.bucketize_binary_calibration(probs, targets, num_bins=2)
+    assert len(rows) == 2
+    assert rows[0]["count"] == 2
+    assert rows[1]["count"] == 2
+    assert math.isclose(rows[0]["avg_target"], 0.0, abs_tol=1e-6)
+    assert math.isclose(rows[1]["avg_target"], 1.0, abs_tol=1e-6)
+
+
+def test_infer_regression_source_detects_trajectory_shift():
+    module = _load_joint_regression_module()
+    joint = {
+        "val_reg_loss": 2.0,
+        "val_minMR": 0.10,
+        "val_minFDE": 1.2,
+        "val_minADE": 0.8,
+    }
+    freeze = {
+        "val_reg_loss": 1.0,
+        "val_minMR": 0.05,
+        "val_minFDE": 1.0,
+        "val_minADE": 0.7,
+    }
+    assert module.infer_regression_source(joint, freeze) == "trajectory_regression_shift"
+
+
+def test_infer_regression_source_detects_selection_shift():
+    module = _load_joint_regression_module()
+    joint = {
+        "val_reg_loss": 1.02,
+        "val_minMR": 0.09,
+        "val_minFDE": 1.01,
+        "val_minADE": 0.70,
+    }
+    freeze = {
+        "val_reg_loss": 1.0,
+        "val_minMR": 0.05,
+        "val_minFDE": 1.0,
+        "val_minADE": 0.70,
+    }
+    assert module.infer_regression_source(joint, freeze) == "selection_shift"
