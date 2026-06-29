@@ -20,6 +20,8 @@ SCENE_CALIB_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "ana
 SCENE_CALIB_SPEC = importlib.util.spec_from_file_location("scene_calibration_module", SCENE_CALIB_MODULE_PATH)
 JOINT_REGRESSION_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "analyze_joint_training_regression.py"
 JOINT_REGRESSION_SPEC = importlib.util.spec_from_file_location("joint_regression_module", JOINT_REGRESSION_MODULE_PATH)
+GRAD_INTERFERENCE_MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "analyze_backbone_gradient_interference.py"
+GRAD_INTERFERENCE_SPEC = importlib.util.spec_from_file_location("grad_interference_module", GRAD_INTERFERENCE_MODULE_PATH)
 
 
 def _load_module():
@@ -54,6 +56,13 @@ def _load_joint_regression_module():
     module = importlib.util.module_from_spec(JOINT_REGRESSION_SPEC)
     assert JOINT_REGRESSION_SPEC.loader is not None
     JOINT_REGRESSION_SPEC.loader.exec_module(module)
+    return module
+
+
+def _load_grad_interference_module():
+    module = importlib.util.module_from_spec(GRAD_INTERFERENCE_SPEC)
+    assert GRAD_INTERFERENCE_SPEC.loader is not None
+    GRAD_INTERFERENCE_SPEC.loader.exec_module(module)
     return module
 
 
@@ -216,3 +225,53 @@ def test_infer_regression_source_detects_selection_shift():
         "val_minADE": 0.70,
     }
     assert module.infer_regression_source(joint, freeze) == "selection_shift"
+
+
+def test_flatten_gradients_concatenates_non_none_tensors():
+    module = _load_grad_interference_module()
+    grads = [
+        torch.tensor([1.0, 2.0]),
+        None,
+        torch.tensor([[3.0], [4.0]]),
+    ]
+    flat = module.flatten_gradients(grads)
+    assert torch.allclose(flat, torch.tensor([1.0, 2.0, 3.0, 4.0]))
+
+
+def test_compare_gradient_vectors_reports_conflict_and_norm_ratio():
+    module = _load_grad_interference_module()
+    reference = torch.tensor([1.0, 0.0])
+    other = torch.tensor([-1.0, 0.0])
+    stats = module.compare_gradient_vectors(reference, other)
+    assert math.isclose(stats["cosine"], -1.0, abs_tol=1e-6)
+    assert math.isclose(stats["norm_ratio"], 1.0, abs_tol=1e-6)
+
+
+def test_summarize_metric_rows_tracks_negative_fraction():
+    module = _load_grad_interference_module()
+    rows = [
+        {"cosine": -0.5, "norm_ratio": 0.25, "ref_norm": 2.0, "other_norm": 0.5},
+        {"cosine": 0.5, "norm_ratio": 0.50, "ref_norm": 4.0, "other_norm": 2.0},
+    ]
+    summary = module.summarize_metric_rows(rows)
+    assert math.isclose(summary["mean_cosine"], 0.0, abs_tol=1e-6)
+    assert math.isclose(summary["negative_fraction"], 0.5, abs_tol=1e-6)
+    assert math.isclose(summary["mean_norm_ratio"], 0.375, abs_tol=1e-6)
+
+
+def test_combine_weighted_losses_applies_coefficients():
+    module = _load_grad_interference_module()
+    loss_terms = {
+        "mode_risk_loss": torch.tensor(2.0),
+        "scene_loss": torch.tensor(3.0),
+        "rank_loss": torch.tensor(4.0),
+        "calib_loss": torch.tensor(5.0),
+    }
+    weights = {
+        "mode_risk_loss": 1.0,
+        "scene_loss": 0.2,
+        "rank_loss": 0.5,
+        "calib_loss": 0.1,
+    }
+    weighted = module.combine_weighted_losses(loss_terms, weights)
+    assert math.isclose(float(weighted.item()), 5.1, abs_tol=1e-6)
