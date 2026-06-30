@@ -11,11 +11,51 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, Tuple
+from argparse import ArgumentParser
+from argparse import ArgumentTypeError
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch_geometric.data import Data
+
+
+def str2bool(value) -> bool:
+    """Parse common boolean string literals for argparse."""
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ArgumentTypeError("expected a boolean value, got {!r}".format(value))
+
+
+def merge_checkpoint_hparams(
+    cli_args: Dict[str, Any],
+    checkpoint_hparams: Dict[str, Any],
+    runtime_arg_names: Iterable[str],
+) -> Dict[str, Any]:
+    merged = dict(cli_args)
+    runtime_arg_names = set(runtime_arg_names)
+    for key, value in checkpoint_hparams.items():
+        if key in runtime_arg_names:
+            continue
+        merged[key] = value
+    return merged
+
+
+def make_parser_arg_optional(
+    parser: ArgumentParser,
+    dest: str,
+    default: Any = None,
+) -> None:
+    for action in parser._actions:
+        if action.dest == dest:
+            action.required = False
+            action.default = default
+            break
 
 
 def extract_lightning_batch_size(batch) -> int:

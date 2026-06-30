@@ -158,6 +158,34 @@ def test_summarize_reranking_cases_separates_threshold_crossings():
     assert summary["still_hit_worsened_count"] == 0
 
 
+def test_merge_checkpoint_hparams_prefers_checkpoint_values_for_model_args():
+    module = _load_rerank_module()
+    cli_args = {
+        "embed_dim": 64,
+        "use_reliability": False,
+        "freeze_backbone": False,
+        "scene_target_policy": "scene_max",
+        "max_batches": 32,
+    }
+    checkpoint_hparams = {
+        "use_reliability": True,
+        "freeze_backbone": True,
+        "scene_target_policy": "target_best_mode_fail",
+    }
+
+    merged = module.merge_checkpoint_hparams(
+        cli_args,
+        checkpoint_hparams,
+        runtime_arg_names=module.RUNTIME_ARG_NAMES,
+    )
+
+    assert merged["embed_dim"] == 64
+    assert merged["max_batches"] == 32
+    assert merged["use_reliability"] is True
+    assert merged["freeze_backbone"] is True
+    assert merged["scene_target_policy"] == "target_best_mode_fail"
+
+
 def test_summarize_reranking_cases_tracks_unchanged_cases_separately():
     module = _load_rerank_module()
     original_fde = torch.tensor([1.0, 2.5, 1.5, 3.0])

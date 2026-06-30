@@ -64,3 +64,24 @@ def test_build_reliability_train_args_accepts_freeze_backbone_flag():
     )
 
     assert args["freeze_backbone"] is True
+
+
+def test_build_reliability_train_args_accepts_threshold_objective_overrides():
+    args = training_presets.build_reliability_train_args(
+        embed_dim=64,
+        mode_risk_threshold_weight_enabled=True,
+        mode_risk_threshold_weight_radius=0.2,
+        mode_risk_threshold_weight_peak=3.0,
+        mode_risk_threshold_weight_base=1.25,
+        mode_risk_rank_top_k=3,
+        mode_risk_rank_near_threshold_only=True,
+        mode_risk_rank_threshold_radius=0.15,
+    )
+
+    assert args["mode_risk_threshold_weight_enabled"] is True
+    assert args["mode_risk_threshold_weight_radius"] == 0.2
+    assert args["mode_risk_threshold_weight_peak"] == 3.0
+    assert args["mode_risk_threshold_weight_base"] == 1.25
+    assert args["mode_risk_rank_top_k"] == 3
+    assert args["mode_risk_rank_near_threshold_only"] is True
+    assert args["mode_risk_rank_threshold_radius"] == 0.15

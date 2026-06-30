@@ -35,6 +35,24 @@ warnings.filterwarnings(
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
+from utils import make_parser_arg_optional
+from utils import merge_checkpoint_hparams
+from utils import str2bool
+
+
+RUNTIME_ARG_NAMES = {
+    'root',
+    'ckpt_path',
+    'split',
+    'max_batches',
+    'train_batch_size',
+    'val_batch_size',
+    'shuffle',
+    'num_workers',
+    'pin_memory',
+    'persistent_workers',
+    'gpus',
+}
 
 
 def flatten_gradients(grads: Sequence[Optional[torch.Tensor]]) -> torch.Tensor:
@@ -113,6 +131,7 @@ def _module_parameters(module: torch.nn.Module) -> List[torch.nn.Parameter]:
 
 def _compute_loss_terms(model, data) -> Dict[str, torch.Tensor]:
     from models import build_reliability_targets
+    from models import compute_threshold_weights
     from models import reconstruct_lane_positions
 
     y_hat, pi, reliability_outputs = model(data)
@@ -170,15 +189,32 @@ def _compute_loss_terms(model, data) -> Dict[str, torch.Tensor]:
         mode_targets = targets['mode_targets']
         scene_targets = targets['scene_targets']
         if valid_mask.any():
-            mode_risk_loss = model.risk_loss(
+            raw_mode_risk_loss = F.binary_cross_entropy_with_logits(
                 reliability_outputs['mode_risk_logits'][valid_mask],
                 mode_targets[valid_mask],
+                reduction='none',
             )
+            if model.mode_risk_threshold_weight_enabled:
+                threshold_weights = compute_threshold_weights(
+                    fde=targets['fde'],
+                    threshold=model.risk_fde_threshold,
+                    radius=model.mode_risk_threshold_weight_radius,
+                    base_weight=model.mode_risk_threshold_weight_base,
+                    peak_weight=model.mode_risk_threshold_weight_peak,
+                    valid_mask=valid_mask,
+                )[valid_mask]
+                mode_risk_loss = (raw_mode_risk_loss * threshold_weights).sum() / threshold_weights.sum().clamp(min=1e-6)
+            else:
+                mode_risk_loss = raw_mode_risk_loss.mean()
             if model.rank_loss_weight > 0:
                 rank_loss = model.rank_loss_fn(
                     mode_risk=reliability_outputs['mode_risk'],
-                    mode_error=targets['mode_error'],
+                    mode_error=targets['fde'],
                     valid_mask=valid_mask,
+                    mode_logits=pi.detach(),
+                    top_k=model.mode_risk_rank_top_k if model.mode_risk_rank_top_k > 0 else None,
+                    focus_threshold=model.risk_fde_threshold if model.mode_risk_rank_near_threshold_only else None,
+                    focus_radius=model.mode_risk_rank_threshold_radius if model.mode_risk_rank_near_threshold_only else None,
                 )
             if model.calib_loss_weight > 0:
                 calib_loss = model.calib_loss_fn(
@@ -287,12 +323,13 @@ def main() -> None:
     parser.add_argument('--max_batches', type=int, default=8)
     parser.add_argument('--train_batch_size', type=int, default=8)
     parser.add_argument('--val_batch_size', type=int, default=8)
-    parser.add_argument('--shuffle', type=bool, default=True)
+    parser.add_argument('--shuffle', type=str2bool, default=True)
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--pin_memory', type=bool, default=False)
-    parser.add_argument('--persistent_workers', type=bool, default=False)
+    parser.add_argument('--pin_memory', type=str2bool, default=False)
+    parser.add_argument('--persistent_workers', type=str2bool, default=False)
     parser.add_argument('--gpus', type=int, default=0)
     parser = HiVT.add_model_specific_args(parser)
+    make_parser_arg_optional(parser, 'embed_dim', default=None)
     args = parser.parse_args()
 
     pl.seed_everything(2022)
@@ -303,11 +340,17 @@ def main() -> None:
     datamodule.setup()
     loader = datamodule.train_dataloader() if args.split == 'train' else datamodule.val_dataloader()
 
+    checkpoint = torch.load(args.ckpt_path, map_location='cpu')
+    model_kwargs = merge_checkpoint_hparams(
+        dict(vars(args)),
+        checkpoint.get('hyper_parameters', {}),
+        runtime_arg_names=RUNTIME_ARG_NAMES,
+    )
     model = HiVT.load_from_checkpoint(
         checkpoint_path=args.ckpt_path,
         map_location=device,
         strict=False,
-        **vars(args),
+        **model_kwargs,
     ).to(device)
     model.freeze_backbone = False
     for module in _named_backbone_modules(model).values():

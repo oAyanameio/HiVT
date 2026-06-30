@@ -34,10 +34,12 @@ from models import LocalEncoder
 from models import MLPDecoder
 from models import ReliabilityModule
 from models import build_reliability_targets
+from models import compute_threshold_weights
 from models import reconstruct_lane_positions
 from models import summarize_reliability_targets
 from utils import TemporalData
 from utils import extract_lightning_batch_size
+from utils import str2bool
 
 
 pl_data.extract_batch_size = extract_lightning_batch_size
@@ -74,6 +76,13 @@ class HiVT(pl.LightningModule):
                  scene_loss_weight: float,
                  rank_loss_weight: float,
                  calib_loss_weight: float,
+                 mode_risk_threshold_weight_enabled: bool,
+                 mode_risk_threshold_weight_radius: float,
+                 mode_risk_threshold_weight_peak: float,
+                 mode_risk_threshold_weight_base: float,
+                 mode_risk_rank_top_k: int,
+                 mode_risk_rank_near_threshold_only: bool,
+                 mode_risk_rank_threshold_radius: float,
                  risk_fde_threshold: float,
                  risk_conflict_threshold: float,
                  risk_offroad_threshold: float,
@@ -121,6 +130,13 @@ class HiVT(pl.LightningModule):
         self.scene_loss_weight = scene_loss_weight
         self.rank_loss_weight = rank_loss_weight
         self.calib_loss_weight = calib_loss_weight
+        self.mode_risk_threshold_weight_enabled = mode_risk_threshold_weight_enabled
+        self.mode_risk_threshold_weight_radius = mode_risk_threshold_weight_radius
+        self.mode_risk_threshold_weight_peak = mode_risk_threshold_weight_peak
+        self.mode_risk_threshold_weight_base = mode_risk_threshold_weight_base
+        self.mode_risk_rank_top_k = mode_risk_rank_top_k
+        self.mode_risk_rank_near_threshold_only = mode_risk_rank_near_threshold_only
+        self.mode_risk_rank_threshold_radius = mode_risk_rank_threshold_radius
         self.risk_fde_threshold = risk_fde_threshold
         self.risk_conflict_threshold = risk_conflict_threshold
         self.risk_offroad_threshold = risk_offroad_threshold
@@ -286,10 +302,25 @@ class HiVT(pl.LightningModule):
             mode_targets = reliability_targets['mode_targets']
             valid_mask = reliability_targets['valid_mask']
             scene_targets = reliability_targets['scene_targets']
-            risk_loss = self.risk_loss(
-                reliability_outputs['mode_risk_logits'][valid_mask],
-                mode_targets[valid_mask],
-            )
+            risk_loss = torch.zeros((), device=loss.device)
+            if valid_mask.any():
+                raw_risk_loss = F.binary_cross_entropy_with_logits(
+                    reliability_outputs['mode_risk_logits'][valid_mask],
+                    mode_targets[valid_mask],
+                    reduction='none',
+                )
+                if self.mode_risk_threshold_weight_enabled:
+                    threshold_weights = compute_threshold_weights(
+                        fde=reliability_targets['fde'],
+                        threshold=self.risk_fde_threshold,
+                        radius=self.mode_risk_threshold_weight_radius,
+                        base_weight=self.mode_risk_threshold_weight_base,
+                        peak_weight=self.mode_risk_threshold_weight_peak,
+                        valid_mask=valid_mask,
+                    )[valid_mask]
+                    risk_loss = (raw_risk_loss * threshold_weights).sum() / threshold_weights.sum().clamp(min=1e-6)
+                else:
+                    risk_loss = raw_risk_loss.mean()
             scene_loss = self.risk_loss(
                 reliability_outputs['scene_risk_logits'],
                 scene_targets,
@@ -298,8 +329,12 @@ class HiVT(pl.LightningModule):
             if self.rank_loss_weight > 0:
                 rank_loss = self.rank_loss_fn(
                     mode_risk=reliability_outputs['mode_risk'],
-                    mode_error=reliability_targets['mode_error'],
+                    mode_error=reliability_targets['fde'],
                     valid_mask=valid_mask,
+                    mode_logits=pi.detach(),
+                    top_k=self.mode_risk_rank_top_k if self.mode_risk_rank_top_k > 0 else None,
+                    focus_threshold=self.risk_fde_threshold if self.mode_risk_rank_near_threshold_only else None,
+                    focus_radius=self.mode_risk_rank_threshold_radius if self.mode_risk_rank_near_threshold_only else None,
                 )
                 loss = loss + self.rank_loss_weight * rank_loss
                 self.log('train_rank_loss', rank_loss, prog_bar=False, on_step=True, on_epoch=True, batch_size=1)
@@ -390,7 +425,23 @@ class HiVT(pl.LightningModule):
             valid_mask = reliability_targets['valid_mask']
             scene_targets = reliability_targets['scene_targets']
             if valid_mask.any():
-                val_risk_loss = self.risk_loss(reliability_outputs['mode_risk_logits'][valid_mask], mode_targets[valid_mask])
+                raw_val_risk_loss = F.binary_cross_entropy_with_logits(
+                    reliability_outputs['mode_risk_logits'][valid_mask],
+                    mode_targets[valid_mask],
+                    reduction='none',
+                )
+                if self.mode_risk_threshold_weight_enabled:
+                    threshold_weights = compute_threshold_weights(
+                        fde=reliability_targets['fde'],
+                        threshold=self.risk_fde_threshold,
+                        radius=self.mode_risk_threshold_weight_radius,
+                        base_weight=self.mode_risk_threshold_weight_base,
+                        peak_weight=self.mode_risk_threshold_weight_peak,
+                        valid_mask=valid_mask,
+                    )[valid_mask]
+                    val_risk_loss = (raw_val_risk_loss * threshold_weights).sum() / threshold_weights.sum().clamp(min=1e-6)
+                else:
+                    val_risk_loss = raw_val_risk_loss.mean()
                 self.log('val_risk_loss', val_risk_loss, prog_bar=False, on_step=False, on_epoch=True,
                          batch_size=int(valid_mask.sum().item()))
             if scene_targets.numel() > 0:
@@ -492,7 +543,7 @@ class HiVT(pl.LightningModule):
         parser.add_argument('--historical_steps', type=int, default=20)
         parser.add_argument('--future_steps', type=int, default=30)
         parser.add_argument('--num_modes', type=int, default=6)
-        parser.add_argument('--rotate', type=bool, default=True)
+        parser.add_argument('--rotate', type=str2bool, default=True)
         parser.add_argument('--node_dim', type=int, default=2)
         parser.add_argument('--edge_dim', type=int, default=2)
         parser.add_argument('--embed_dim', type=int, required=True)
@@ -501,14 +552,21 @@ class HiVT(pl.LightningModule):
         parser.add_argument('--num_temporal_layers', type=int, default=4)
         parser.add_argument('--num_global_layers', type=int, default=3)
         parser.add_argument('--local_radius', type=float, default=50)
-        parser.add_argument('--parallel', type=bool, default=False)
-        parser.add_argument('--use_reliability', type=bool, default=False)
+        parser.add_argument('--parallel', type=str2bool, default=False)
+        parser.add_argument('--use_reliability', type=str2bool, default=False)
         parser.add_argument('--reliability_hidden_dim', type=int, default=128)
         parser.add_argument('--reliability_rerank_alpha', type=float, default=0.0)
         parser.add_argument('--reliability_loss_weight', type=float, default=1.0)
         parser.add_argument('--scene_loss_weight', type=float, default=0.2)
         parser.add_argument('--rank_loss_weight', type=float, default=0.0)
         parser.add_argument('--calib_loss_weight', type=float, default=0.0)
+        parser.add_argument('--mode_risk_threshold_weight_enabled', type=str2bool, default=False)
+        parser.add_argument('--mode_risk_threshold_weight_radius', type=float, default=0.25)
+        parser.add_argument('--mode_risk_threshold_weight_peak', type=float, default=2.0)
+        parser.add_argument('--mode_risk_threshold_weight_base', type=float, default=1.0)
+        parser.add_argument('--mode_risk_rank_top_k', type=int, default=0)
+        parser.add_argument('--mode_risk_rank_near_threshold_only', type=str2bool, default=False)
+        parser.add_argument('--mode_risk_rank_threshold_radius', type=float, default=0.25)
         parser.add_argument('--risk_fde_threshold', type=float, default=2.0)
         parser.add_argument('--risk_miss_threshold', type=float, default=4.0)
         parser.add_argument('--risk_conflict_threshold', type=float, default=1.0)
@@ -521,7 +579,7 @@ class HiVT(pl.LightningModule):
                             choices=['target_best_mode_fail', 'target_mode_rate', 'scene_rate', 'scene_max'])
         parser.add_argument('--risk_conflict_scope', type=str, default='target_to_neighbors',
                             choices=['target_to_neighbors', 'all_valid_pairs'])
-        parser.add_argument('--freeze_backbone', type=bool, default=False)
+        parser.add_argument('--freeze_backbone', type=str2bool, default=False)
         parser.add_argument('--lr', type=float, default=5e-4)
         parser.add_argument('--weight_decay', type=float, default=1e-4)
         parser.add_argument('--T_max', type=int, default=64)

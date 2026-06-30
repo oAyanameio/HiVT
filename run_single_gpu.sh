@@ -213,6 +213,15 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   local risk_scene_rate_threshold="${RISK_SCENE_RATE_THRESHOLD:-0.5}"
   local reliability_rerank_alpha="${RELIABILITY_RERANK_ALPHA:-0.0}"
   local scene_loss_weight="${SCENE_LOSS_WEIGHT:-0.2}"
+  local rank_loss_weight="${RANK_LOSS_WEIGHT:-0.0}"
+  local calib_loss_weight="${CALIB_LOSS_WEIGHT:-0.0}"
+  local mode_risk_threshold_weight_enabled="${MODE_RISK_THRESHOLD_WEIGHT_ENABLED:-false}"
+  local mode_risk_threshold_weight_radius="${MODE_RISK_THRESHOLD_WEIGHT_RADIUS:-0.25}"
+  local mode_risk_threshold_weight_peak="${MODE_RISK_THRESHOLD_WEIGHT_PEAK:-2.0}"
+  local mode_risk_threshold_weight_base="${MODE_RISK_THRESHOLD_WEIGHT_BASE:-1.0}"
+  local mode_risk_rank_top_k="${MODE_RISK_RANK_TOP_K:-0}"
+  local mode_risk_rank_near_threshold_only="${MODE_RISK_RANK_NEAR_THRESHOLD_ONLY:-false}"
+  local mode_risk_rank_threshold_radius="${MODE_RISK_RANK_THRESHOLD_RADIUS:-0.25}"
   local freeze_backbone="${FREEZE_BACKBONE:-false}"
 
   check_data_ready
@@ -228,6 +237,7 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   echo "max_epochs=$max_epochs ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
   echo "experiment_name=$experiment_name run_version=$run_version"
   echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope freeze_backbone=$freeze_backbone"
+  echo "rank_loss_weight=$rank_loss_weight calib_loss_weight=$calib_loss_weight threshold_weight=$mode_risk_threshold_weight_enabled top_k=$mode_risk_rank_top_k"
 
   exec env CUDA_VISIBLE_DEVICES="$gpu_id" PYTHONUNBUFFERED=1 python train.py \
     --root "$DATA_ROOT" \
@@ -245,6 +255,15 @@ run_train_reliability() {  local embed_choice="${1:-64}"
     --use_reliability true \
     --reliability_rerank_alpha "$reliability_rerank_alpha" \
     --scene_loss_weight "$scene_loss_weight" \
+    --rank_loss_weight "$rank_loss_weight" \
+    --calib_loss_weight "$calib_loss_weight" \
+    --mode_risk_threshold_weight_enabled "$mode_risk_threshold_weight_enabled" \
+    --mode_risk_threshold_weight_radius "$mode_risk_threshold_weight_radius" \
+    --mode_risk_threshold_weight_peak "$mode_risk_threshold_weight_peak" \
+    --mode_risk_threshold_weight_base "$mode_risk_threshold_weight_base" \
+    --mode_risk_rank_top_k "$mode_risk_rank_top_k" \
+    --mode_risk_rank_near_threshold_only "$mode_risk_rank_near_threshold_only" \
+    --mode_risk_rank_threshold_radius "$mode_risk_rank_threshold_radius" \
     --risk_fde_threshold "$risk_fde_threshold" \
     --risk_miss_threshold "$risk_miss_threshold" \
     --risk_conflict_threshold "$risk_conflict_threshold" \
@@ -289,6 +308,15 @@ run_train_reliability_shift() {
   local risk_scene_rate_threshold="${RISK_SCENE_RATE_THRESHOLD:-0.5}"
   local reliability_rerank_alpha="${RELIABILITY_RERANK_ALPHA:-0.0}"
   local scene_loss_weight="${SCENE_LOSS_WEIGHT:-0.2}"
+  local rank_loss_weight="${RANK_LOSS_WEIGHT:-0.0}"
+  local calib_loss_weight="${CALIB_LOSS_WEIGHT:-0.0}"
+  local mode_risk_threshold_weight_enabled="${MODE_RISK_THRESHOLD_WEIGHT_ENABLED:-false}"
+  local mode_risk_threshold_weight_radius="${MODE_RISK_THRESHOLD_WEIGHT_RADIUS:-0.25}"
+  local mode_risk_threshold_weight_peak="${MODE_RISK_THRESHOLD_WEIGHT_PEAK:-2.0}"
+  local mode_risk_threshold_weight_base="${MODE_RISK_THRESHOLD_WEIGHT_BASE:-1.0}"
+  local mode_risk_rank_top_k="${MODE_RISK_RANK_TOP_K:-0}"
+  local mode_risk_rank_near_threshold_only="${MODE_RISK_RANK_NEAR_THRESHOLD_ONLY:-false}"
+  local mode_risk_rank_threshold_radius="${MODE_RISK_RANK_THRESHOLD_RADIUS:-0.25}"
   local freeze_backbone="${FREEZE_BACKBONE:-false}"
 
   check_data_ready
@@ -303,6 +331,7 @@ run_train_reliability_shift() {
   echo "limit_train_batches=$limit_train_batches limit_val_batches=$limit_val_batches"
   echo "max_epochs=$max_epochs ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
   echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope freeze_backbone=$freeze_backbone"
+  echo "rank_loss_weight=$rank_loss_weight calib_loss_weight=$calib_loss_weight threshold_weight=$mode_risk_threshold_weight_enabled top_k=$mode_risk_rank_top_k"
 
   exec env CUDA_VISIBLE_DEVICES="$gpu_id" PYTHONUNBUFFERED=1 python train.py \
     --root "$DATA_ROOT" \
@@ -320,6 +349,15 @@ run_train_reliability_shift() {
     --use_reliability true \
     --reliability_rerank_alpha "$reliability_rerank_alpha" \
     --scene_loss_weight "$scene_loss_weight" \
+    --rank_loss_weight "$rank_loss_weight" \
+    --calib_loss_weight "$calib_loss_weight" \
+    --mode_risk_threshold_weight_enabled "$mode_risk_threshold_weight_enabled" \
+    --mode_risk_threshold_weight_radius "$mode_risk_threshold_weight_radius" \
+    --mode_risk_threshold_weight_peak "$mode_risk_threshold_weight_peak" \
+    --mode_risk_threshold_weight_base "$mode_risk_threshold_weight_base" \
+    --mode_risk_rank_top_k "$mode_risk_rank_top_k" \
+    --mode_risk_rank_near_threshold_only "$mode_risk_rank_near_threshold_only" \
+    --mode_risk_rank_threshold_radius "$mode_risk_rank_threshold_radius" \
     --risk_fde_threshold "$risk_fde_threshold" \
     --risk_miss_threshold "$risk_miss_threshold" \
     --risk_conflict_threshold "$risk_conflict_threshold" \

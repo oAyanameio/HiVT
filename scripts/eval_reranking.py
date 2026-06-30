@@ -30,8 +30,27 @@ warnings.filterwarnings(
 
 import pytorch_lightning as pl
 import torch
+from utils import make_parser_arg_optional
+from utils import merge_checkpoint_hparams
+from utils import str2bool
 
 
+RUNTIME_ARG_NAMES = {
+    'root',
+    'ckpt_path',
+    'rerank_alpha',
+    'rerank_method',
+    'rerank_top_k',
+    'miss_threshold',
+    'max_batches',
+    'train_batch_size',
+    'val_batch_size',
+    'shuffle',
+    'num_workers',
+    'pin_memory',
+    'persistent_workers',
+    'gpus',
+}
 def rerank_scores(
     pi: torch.Tensor,
     risk: torch.Tensor,
@@ -134,12 +153,13 @@ def main() -> None:
     parser.add_argument('--max_batches', type=int, default=32)
     parser.add_argument('--train_batch_size', type=int, default=8)
     parser.add_argument('--val_batch_size', type=int, default=8)
-    parser.add_argument('--shuffle', type=bool, default=True)
+    parser.add_argument('--shuffle', type=str2bool, default=True)
     parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--pin_memory', type=bool, default=False)
-    parser.add_argument('--persistent_workers', type=bool, default=False)
+    parser.add_argument('--pin_memory', type=str2bool, default=False)
+    parser.add_argument('--persistent_workers', type=str2bool, default=False)
     parser.add_argument('--gpus', type=int, default=0)
     parser = HiVT.add_model_specific_args(parser)
+    make_parser_arg_optional(parser, 'embed_dim', default=None)
     args = parser.parse_args()
 
     pl.seed_everything(2022)
@@ -149,11 +169,17 @@ def main() -> None:
     datamodule.setup()
     loader = datamodule.val_dataloader()
 
+    checkpoint = torch.load(args.ckpt_path, map_location='cpu')
+    model_kwargs = merge_checkpoint_hparams(
+        dict(vars(args)),
+        checkpoint.get('hyper_parameters', {}),
+        runtime_arg_names=RUNTIME_ARG_NAMES,
+    )
     model = HiVT.load_from_checkpoint(
         checkpoint_path=args.ckpt_path,
         map_location=device,
         strict=False,
-        **vars(args),
+        **model_kwargs,
     ).to(device)
     model.eval()
     if model.reliability_module is None:

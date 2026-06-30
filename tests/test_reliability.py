@@ -12,6 +12,7 @@ SPEC.loader.exec_module(reliability_module)
 
 ReliabilityModule = reliability_module.ReliabilityModule
 apply_risk_reranking = reliability_module.apply_risk_reranking
+compute_threshold_weights = reliability_module.compute_threshold_weights
 compute_mode_risk_targets = reliability_module.compute_mode_risk_targets
 compute_scene_risk_targets = reliability_module.compute_scene_risk_targets
 compute_conflict_risk_targets = reliability_module.compute_conflict_risk_targets
@@ -70,6 +71,38 @@ def test_compute_mode_and_scene_risk_targets_from_terminal_error():
     assert fde[0, 1].item() == 2.0
     assert fde[1, 2].item() == 1.5
     assert scene_targets.tolist() == [0.0, 0.0]
+
+
+def test_compute_threshold_weights_emphasizes_boundary_samples():
+    fde = torch.tensor([[1.0, 1.9, 2.0, 2.1, 3.5]])
+
+    weights = compute_threshold_weights(
+        fde=fde,
+        threshold=2.0,
+        radius=0.25,
+        base_weight=1.0,
+        peak_weight=3.0,
+    )
+
+    expected = torch.tensor([[1.0, 2.2, 3.0, 2.2, 1.0]])
+    assert torch.allclose(weights, expected, atol=1e-6)
+
+
+def test_compute_threshold_weights_keeps_invalid_modes_at_zero():
+    fde = torch.tensor([[1.9, 2.0], [2.1, 2.2]])
+    valid_mask = torch.tensor([True, False])
+
+    weights = compute_threshold_weights(
+        fde=fde,
+        threshold=2.0,
+        radius=0.2,
+        base_weight=1.0,
+        peak_weight=2.0,
+        valid_mask=valid_mask,
+    )
+
+    assert torch.all(weights[1] == 0.0)
+    assert torch.all(weights[0] >= 1.0)
 
 
 def test_compute_conflict_risk_targets_target_to_neighbors_uses_same_time_gt_future():

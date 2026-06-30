@@ -17,6 +17,8 @@
   则其风险分数应满足 r_i > r_j，使风险输出不止于二分类拟合，而具备排序意义。
 - `RiskCalibrationLoss`：soft-ECE 风格的校准损失，约束预测风险与真实失败率一致。
 """
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -44,13 +46,21 @@ class RiskRankLoss(nn.Module):
     def forward(self,
                 mode_risk: torch.Tensor,
                 mode_error: torch.Tensor,
-                valid_mask: torch.Tensor) -> torch.Tensor:
+                valid_mask: torch.Tensor,
+                mode_logits: Optional[torch.Tensor] = None,
+                top_k: Optional[int] = None,
+                focus_threshold: Optional[float] = None,
+                focus_radius: Optional[float] = None) -> torch.Tensor:
         """计算 pairwise 排序损失。
 
         Args:
             mode_risk: [N, F] 预测风险分数（0~1）。
             mode_error: [N, F] 每个 mode 的真实未来误差（如 ADE），越大越该高风险。
             valid_mask: [N] 该 actor 是否有有效未来监督。
+            mode_logits: [N, F] 原始 mode logits，可用于限制 top-k 内排序。
+            top_k: 若给定，只在每个 actor 的 top-k 候选上构造排序对。
+            focus_threshold: 若给定，只保留与该误差阈值邻近的排序对。
+            focus_radius: 与 `focus_threshold` 配套的邻域半径。
 
         Returns:
             排序损失标量（或 `none` 时的逐对张量）。
@@ -67,6 +77,15 @@ class RiskRankLoss(nn.Module):
         # 只保留误差差距显著、且 i 比 j 更差的有序对。
         pair_mask = (err_diff > self.error_margin)
         pair_mask = pair_mask & valid_mask.view(-1, 1, 1)
+        if top_k is not None and top_k > 0 and mode_logits is not None:
+            top_k = min(top_k, mode_logits.size(-1))
+            topk_idx = torch.topk(mode_logits, k=top_k, dim=-1).indices
+            topk_mask = torch.zeros_like(mode_risk, dtype=torch.bool)
+            topk_mask.scatter_(dim=-1, index=topk_idx, value=True)
+            pair_mask = pair_mask & topk_mask.unsqueeze(2) & topk_mask.unsqueeze(1)
+        if focus_threshold is not None and focus_radius is not None and focus_radius > 0:
+            near = (mode_error - focus_threshold).abs() <= focus_radius
+            pair_mask = pair_mask & (near.unsqueeze(2) | near.unsqueeze(1))
         if pair_mask.sum() == 0:
             return mode_risk.new_zeros(())
 

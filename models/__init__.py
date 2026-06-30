@@ -25,6 +25,7 @@ from models.local_encoder import TemporalEncoderLayer
 from models.reliability import ReliabilityModule
 from models.reliability import apply_risk_reranking
 from models.reliability import build_reliability_targets
+from models.reliability import compute_threshold_weights
 from models.reliability import compute_conflict_risk_targets
 from models.reliability import compute_mode_risk_targets
 from models.reliability import compute_offroad_risk_targets

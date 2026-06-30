@@ -30,6 +30,27 @@ def apply_risk_reranking(pi: torch.Tensor, mode_risk: torch.Tensor, alpha: float
     return F.softmax(logits, dim=-1)
 
 
+def compute_threshold_weights(
+    fde: torch.Tensor,
+    threshold: float,
+    radius: float,
+    base_weight: float = 1.0,
+    peak_weight: float = 2.0,
+    valid_mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Construct weights that peak around a decision threshold."""
+    if radius <= 0:
+        weights = torch.full_like(fde, float(base_weight))
+    else:
+        distance = (fde - threshold).abs()
+        proximity = (1.0 - distance / max(radius, eps)).clamp(min=0.0, max=1.0)
+        weights = base_weight + (peak_weight - base_weight) * proximity
+    if valid_mask is not None:
+        weights = weights * valid_mask.unsqueeze(-1).float()
+    return weights
+
+
 def _last_valid_step(reg_mask: torch.Tensor) -> torch.Tensor:
     valid_steps = reg_mask.long().sum(dim=-1)
     return torch.clamp(valid_steps - 1, min=0)
@@ -404,7 +425,7 @@ def build_reliability_targets(
     避免再次把主监督打满。scene 监督由 `scene_target_policy` 决定（见
     `compute_scene_risk_targets`），默认 `target_best_mode_fail`。
 
-    同时返回每个 mode 的连续位移误差 `mode_error`（[N, F]），供 rank loss 使用。
+    同时返回每个 mode 的连续终点误差 `mode_error`（[N, F]），供 rank loss 使用。
     """
     mode_targets_fde, valid_mask, fde = compute_mode_risk_targets(
         y_hat=y_hat,
@@ -481,7 +502,7 @@ def build_reliability_targets(
         "valid_mask": valid_mask,
         "fde": fde,
         "ade": ade,
-        "mode_error": ade,
+        "mode_error": fde,
         "min_pair_dist": min_pair_dist,
         "lane_distance": lane_distance,
         "agent_index": agent_index if agent_index is None else agent_index.view(-1),
@@ -845,8 +866,6 @@ class ReliabilityModule(nn.Module):
             "scene_risk": scene_risk,
             "reranked_pi": reranked_pi,
         }
-
-
 
 
 

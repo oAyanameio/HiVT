@@ -39,6 +39,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from datamodules import ArgoverseV1DataModule
 from datasets import ShiftAugment
 from models.hivt import HiVT
+from utils import str2bool
 
 if __name__ == '__main__':
     pl.seed_everything(2022)
@@ -47,10 +48,10 @@ if __name__ == '__main__':
     parser.add_argument('--root', type=str, required=True)
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--val_batch_size', type=int, default=32)
-    parser.add_argument('--shuffle', type=bool, default=True)
+    parser.add_argument('--shuffle', type=str2bool, default=True)
     parser.add_argument('--num_workers', type=int, default=8)
-    parser.add_argument('--pin_memory', type=bool, default=True)
-    parser.add_argument('--persistent_workers', type=bool, default=True)
+    parser.add_argument('--pin_memory', type=str2bool, default=True)
+    parser.add_argument('--persistent_workers', type=str2bool, default=True)
     parser.add_argument('--gpus', type=int, default=1)
     parser.add_argument('--max_epochs', type=int, default=64)
     parser.add_argument('--limit_train_batches', type=float, default=1.0)
