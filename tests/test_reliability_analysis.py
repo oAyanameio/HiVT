@@ -137,6 +137,116 @@ def test_probability_space_reranking_alpha_zero_reduces_to_log_softmax():
     assert torch.allclose(scores, torch.log_softmax(pi, dim=-1), atol=1e-6)
 
 
+def test_select_rerank_indices_allows_switch_without_margin_or_guard():
+    module = _load_rerank_module()
+    pi = torch.tensor([[3.0, 2.0]])
+    risk = torch.tensor([[0.9, 0.1]])
+    selected = module.select_rerank_indices(
+        pi,
+        risk,
+        method="prob_product",
+        alpha=1.0,
+        top_k=None,
+    )
+    assert int(selected[0]) == 1
+
+
+def test_select_rerank_indices_blocks_switch_when_margin_not_met():
+    module = _load_rerank_module()
+    pi = torch.tensor([[3.0, 2.9]])
+    risk = torch.tensor([[0.55, 0.45]])
+    selected = module.select_rerank_indices(
+        pi,
+        risk,
+        method="prob_product",
+        alpha=1.0,
+        top_k=2,
+        margin=0.2,
+    )
+    assert int(selected[0]) == 0
+
+
+def test_select_rerank_indices_blocks_switch_when_guard_keeps_safe_top1():
+    module = _load_rerank_module()
+    pi = torch.tensor([[3.0, 2.0]])
+    risk = torch.tensor([[0.15, 0.0]])
+    selected = module.select_rerank_indices(
+        pi,
+        risk,
+        method="prob_product",
+        alpha=3.0,
+        top_k=None,
+        guard=0.2,
+    )
+    assert int(selected[0]) == 0
+
+
+def test_scan_grid_parser_accepts_comma_separated_values():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "scan_reranking_rules.py"
+    spec = importlib.util.spec_from_file_location("scan_reranking_rules_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    values = module.parse_float_grid("0.0, 0.1,0.2")
+    assert values == [0.0, 0.1, 0.2]
+
+
+def test_build_scan_row_formats_optional_guard_label():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "scan_reranking_rules.py"
+    spec = importlib.util.spec_from_file_location("scan_reranking_rules_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    row = module.build_scan_row(
+        margin=0.1,
+        guard=None,
+        metrics={"reranked_minMR": 0.4},
+    )
+
+    assert row["rerank_margin"] == 0.1
+    assert row["rerank_guard"] == ""
+    assert row["rerank_guard_label"] == "none"
+    assert row["reranked_minMR"] == 0.4
+
+
+def test_case_comparison_quantiles_report_median():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "analyze_reranking_case_comparison.py"
+    spec = importlib.util.spec_from_file_location("reranking_case_compare_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    summary = module.compute_quantiles(torch.tensor([0.0, 1.0, 2.0]), "gap")
+
+    assert summary["gap_count"] == 3.0
+    assert math.isclose(summary["gap_q50"], 1.0, abs_tol=1e-6)
+
+
+def test_summarize_case_comparison_tracks_blocked_harmful_and_helpful_switches():
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "analyze_reranking_case_comparison.py"
+    spec = importlib.util.spec_from_file_location("reranking_case_compare_module", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    summary = module.summarize_case_comparison(
+        original_fde=torch.tensor([1.8, 2.3, 2.6, 1.7]),
+        base_fde=torch.tensor([2.4, 1.9, 1.8, 1.7]),
+        compare_fde=torch.tensor([1.8, 2.3, 1.8, 1.7]),
+        risk_gap=torch.tensor([0.04, 0.03, 0.12, 0.0]),
+        original_risk=torch.tensor([0.5, 0.6, 0.7, 0.2]),
+        miss_threshold=2.0,
+    )
+
+    assert summary["base_switch_count"] == 3.0
+    assert summary["compare_switch_count"] == 1.0
+    assert summary["blocked_switch_count"] == 2.0
+    assert summary["blocked_harmful_count"] == 1.0
+    assert summary["blocked_helpful_count"] == 1.0
+    assert summary["compare_miss_to_hit_count"] == 1.0
+
+
 def test_summarize_reranking_cases_separates_threshold_crossings():
     module = _load_rerank_module()
     original_fde = torch.tensor([1.0, 2.5, 2.8, 1.8])

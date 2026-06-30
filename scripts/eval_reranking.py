@@ -2,6 +2,7 @@
 from argparse import ArgumentParser
 from pathlib import Path
 import sys
+from typing import Any
 from typing import Dict
 from typing import Optional
 import warnings
@@ -39,6 +40,8 @@ RUNTIME_ARG_NAMES = {
     'root',
     'ckpt_path',
     'rerank_alpha',
+    'rerank_margin',
+    'rerank_guard',
     'rerank_method',
     'rerank_top_k',
     'miss_threshold',
@@ -51,6 +54,8 @@ RUNTIME_ARG_NAMES = {
     'persistent_workers',
     'gpus',
 }
+
+
 def rerank_scores(
     pi: torch.Tensor,
     risk: torch.Tensor,
@@ -80,6 +85,44 @@ def rerank_scores(
     topk_scores = reranked.gather(dim=-1, index=topk_idx)
     masked.scatter_(dim=-1, index=topk_idx, src=topk_scores)
     return masked
+
+
+def select_rerank_indices(
+    pi: torch.Tensor,
+    risk: torch.Tensor,
+    method: str,
+    alpha: float,
+    top_k: Optional[int],
+    margin: float = 0.0,
+    guard: Optional[float] = None,
+) -> torch.Tensor:
+    reranked_scores = rerank_scores(
+        pi=pi,
+        risk=risk,
+        method=method,
+        alpha=alpha,
+        top_k=top_k,
+    )
+    orig_idx = pi.argmax(dim=-1)
+    candidate_idx = reranked_scores.argmax(dim=-1)
+
+    if margin <= 0.0 and guard is None:
+        return candidate_idx
+
+    chosen_idx = candidate_idx.clone()
+    batch_index = torch.arange(pi.size(0), device=pi.device)
+    orig_risk = risk[batch_index, orig_idx]
+    candidate_risk = risk[batch_index, candidate_idx]
+    risk_gap = orig_risk - candidate_risk
+
+    allow_switch = candidate_idx != orig_idx
+    if margin > 0.0:
+        allow_switch = allow_switch & (risk_gap > margin)
+    if guard is not None:
+        allow_switch = allow_switch & (orig_risk > guard)
+
+    chosen_idx = torch.where(allow_switch, candidate_idx, orig_idx)
+    return chosen_idx
 
 
 def summarize_reranking_cases(
@@ -136,17 +179,112 @@ def summarize_reranking_cases(
     }
 
 
-def main() -> None:
-    from datamodules import ArgoverseV1DataModule
+def evaluate_reranking(
+    model,
+    loader,
+    device: torch.device,
+    rerank_method: str,
+    rerank_alpha: float,
+    rerank_top_k: Optional[int],
+    rerank_margin: float,
+    rerank_guard: Optional[float],
+    miss_threshold: float,
+    max_batches: int,
+) -> Dict[str, Any]:
     from metrics import ADE
     from metrics import FDE
     from metrics import MR
+
+    orig_ade = ADE().to(device)
+    orig_fde = FDE().to(device)
+    orig_mr = MR().to(device)
+    rerank_ade = ADE().to(device)
+    rerank_fde = FDE().to(device)
+    rerank_mr = MR().to(device)
+    changed = 0.0
+    count = 0.0
+    original_fde_values = []
+    reranked_fde_values = []
+
+    with torch.no_grad():
+        for batch_idx, data in enumerate(loader):
+            if batch_idx >= max_batches:
+                break
+            data = data.to(device)
+            y_hat, pi, reliability_outputs = model(data)
+            y_hat_agent = y_hat[:, data['agent_index'], :, :2]
+            y_agent = data.y[data['agent_index']]
+            graph_indices = torch.arange(data.num_graphs, device=device)
+
+            orig_idx = pi[data['agent_index']].argmax(dim=-1)
+            agent_pi = pi[data['agent_index']]
+            agent_risk = reliability_outputs['mode_risk'][data['agent_index']]
+            rerank_idx = select_rerank_indices(
+                pi=agent_pi,
+                risk=agent_risk,
+                method=rerank_method,
+                alpha=rerank_alpha,
+                top_k=rerank_top_k,
+                margin=rerank_margin,
+                guard=rerank_guard,
+            )
+
+            orig_best = y_hat_agent[orig_idx, graph_indices]
+            rerank_best = y_hat_agent[rerank_idx, graph_indices]
+            batch_orig_fde = torch.norm(orig_best[:, -1] - y_agent[:, -1], p=2, dim=-1)
+            batch_rerank_fde = torch.norm(rerank_best[:, -1] - y_agent[:, -1], p=2, dim=-1)
+
+            orig_ade.update(orig_best, y_agent)
+            orig_fde.update(orig_best, y_agent)
+            orig_mr.update(orig_best, y_agent)
+            rerank_ade.update(rerank_best, y_agent)
+            rerank_fde.update(rerank_best, y_agent)
+            rerank_mr.update(rerank_best, y_agent)
+
+            changed += float((orig_idx != rerank_idx).sum().item())
+            count += float(orig_idx.numel())
+            original_fde_values.append(batch_orig_fde.cpu())
+            reranked_fde_values.append(batch_rerank_fde.cpu())
+
+    case_summary = summarize_reranking_cases(
+        original_fde=torch.cat(original_fde_values, dim=0),
+        reranked_fde=torch.cat(reranked_fde_values, dim=0),
+        miss_threshold=miss_threshold,
+    )
+
+    return {
+        'original_minADE': float(orig_ade.compute()),
+        'original_minFDE': float(orig_fde.compute()),
+        'original_minMR': float(orig_mr.compute()),
+        'reranked_minADE': float(rerank_ade.compute()),
+        'reranked_minFDE': float(rerank_fde.compute()),
+        'reranked_minMR': float(rerank_mr.compute()),
+        'rerank_top1_change_rate': changed / max(count, 1.0),
+        'case_count': case_summary['count'],
+        'case_original_mr': case_summary['original_mr'],
+        'case_reranked_mr': case_summary['reranked_mr'],
+        'case_mean_fde_delta': case_summary['mean_fde_delta'],
+        'case_hit_to_miss_count': case_summary['hit_to_miss_count'],
+        'case_miss_to_hit_count': case_summary['miss_to_hit_count'],
+        'case_still_miss_improved_count': case_summary['still_miss_improved_count'],
+        'case_still_miss_worsened_count': case_summary['still_miss_worsened_count'],
+        'case_still_miss_unchanged_count': case_summary['still_miss_unchanged_count'],
+        'case_still_hit_improved_count': case_summary['still_hit_improved_count'],
+        'case_still_hit_worsened_count': case_summary['still_hit_worsened_count'],
+        'case_still_hit_unchanged_count': case_summary['still_hit_unchanged_count'],
+    }
+
+
+def main() -> None:
+    from datamodules import ArgoverseV1DataModule
     from models.hivt import HiVT
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
     parser.add_argument('--ckpt_path', type=str, required=True)
     parser.add_argument('--rerank_alpha', type=float, default=0.5)
+    parser.add_argument('--rerank_margin', type=float, default=0.0)
+    parser.add_argument('--rerank_guard', type=float, default=None)
     parser.add_argument('--rerank_method', type=str, default='prob_product')
     parser.add_argument('--rerank_top_k', type=int, default=None)
     parser.add_argument('--miss_threshold', type=float, default=2.0)
@@ -186,82 +324,25 @@ def main() -> None:
         raise RuntimeError('Checkpoint does not contain reliability module configuration.')
     model.reliability_module.rerank_alpha = args.rerank_alpha
 
-    orig_ade = ADE().to(device)
-    orig_fde = FDE().to(device)
-    orig_mr = MR().to(device)
-    rerank_ade = ADE().to(device)
-    rerank_fde = FDE().to(device)
-    rerank_mr = MR().to(device)
-    changed = 0.0
-    count = 0.0
-    original_fde_values = []
-    reranked_fde_values = []
-
-    with torch.no_grad():
-        for batch_idx, data in enumerate(loader):
-            if batch_idx >= args.max_batches:
-                break
-            data = data.to(device)
-            y_hat, pi, reliability_outputs = model(data)
-            y_hat_agent = y_hat[:, data['agent_index'], :, :2]
-            y_agent = data.y[data['agent_index']]
-            graph_indices = torch.arange(data.num_graphs, device=device)
-
-            orig_idx = pi[data['agent_index']].argmax(dim=-1)
-            agent_pi = pi[data['agent_index']]
-            agent_risk = reliability_outputs['mode_risk'][data['agent_index']]
-            reranked_scores = rerank_scores(
-                pi=agent_pi,
-                risk=agent_risk,
-                method=args.rerank_method,
-                alpha=args.rerank_alpha,
-                top_k=args.rerank_top_k,
-            )
-            rerank_idx = reranked_scores.argmax(dim=-1)
-
-            orig_best = y_hat_agent[orig_idx, graph_indices]
-            rerank_best = y_hat_agent[rerank_idx, graph_indices]
-            batch_orig_fde = torch.norm(orig_best[:, -1] - y_agent[:, -1], p=2, dim=-1)
-            batch_rerank_fde = torch.norm(rerank_best[:, -1] - y_agent[:, -1], p=2, dim=-1)
-
-            orig_ade.update(orig_best, y_agent)
-            orig_fde.update(orig_best, y_agent)
-            orig_mr.update(orig_best, y_agent)
-            rerank_ade.update(rerank_best, y_agent)
-            rerank_fde.update(rerank_best, y_agent)
-            rerank_mr.update(rerank_best, y_agent)
-
-            changed += float((orig_idx != rerank_idx).sum().item())
-            count += float(orig_idx.numel())
-            original_fde_values.append(batch_orig_fde.cpu())
-            reranked_fde_values.append(batch_rerank_fde.cpu())
-
-    case_summary = summarize_reranking_cases(
-        original_fde=torch.cat(original_fde_values, dim=0),
-        reranked_fde=torch.cat(reranked_fde_values, dim=0),
+    metrics = evaluate_reranking(
+        model=model,
+        loader=loader,
+        device=device,
+        rerank_method=args.rerank_method,
+        rerank_alpha=args.rerank_alpha,
+        rerank_top_k=args.rerank_top_k,
+        rerank_margin=args.rerank_margin,
+        rerank_guard=args.rerank_guard,
         miss_threshold=args.miss_threshold,
+        max_batches=args.max_batches,
     )
 
     print('metric,value')
-    print('original_minADE,{:.6f}'.format(float(orig_ade.compute())))
-    print('original_minFDE,{:.6f}'.format(float(orig_fde.compute())))
-    print('original_minMR,{:.6f}'.format(float(orig_mr.compute())))
-    print('reranked_minADE,{:.6f}'.format(float(rerank_ade.compute())))
-    print('reranked_minFDE,{:.6f}'.format(float(rerank_fde.compute())))
-    print('reranked_minMR,{:.6f}'.format(float(rerank_mr.compute())))
-    print('rerank_top1_change_rate,{:.6f}'.format(changed / max(count, 1.0)))
-    print('case_count,{}'.format(case_summary['count']))
-    print('case_original_mr,{:.6f}'.format(case_summary['original_mr']))
-    print('case_reranked_mr,{:.6f}'.format(case_summary['reranked_mr']))
-    print('case_mean_fde_delta,{:.6f}'.format(case_summary['mean_fde_delta']))
-    print('case_hit_to_miss_count,{}'.format(case_summary['hit_to_miss_count']))
-    print('case_miss_to_hit_count,{}'.format(case_summary['miss_to_hit_count']))
-    print('case_still_miss_improved_count,{}'.format(case_summary['still_miss_improved_count']))
-    print('case_still_miss_worsened_count,{}'.format(case_summary['still_miss_worsened_count']))
-    print('case_still_miss_unchanged_count,{}'.format(case_summary['still_miss_unchanged_count']))
-    print('case_still_hit_improved_count,{}'.format(case_summary['still_hit_improved_count']))
-    print('case_still_hit_worsened_count,{}'.format(case_summary['still_hit_worsened_count']))
-    print('case_still_hit_unchanged_count,{}'.format(case_summary['still_hit_unchanged_count']))
+    for key, value in metrics.items():
+        if isinstance(value, int):
+            print(f'{key},{value}')
+        else:
+            print(f'{key},{value:.6f}')
 
 
 if __name__ == '__main__':
