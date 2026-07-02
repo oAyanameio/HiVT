@@ -42,9 +42,8 @@ from models.hivt import HiVT
 from utils import str2bool
 
 if __name__ == '__main__':
-    pl.seed_everything(2022)
-
     parser = ArgumentParser()
+    parser.add_argument('--seed', type=int, default=2022)
     parser.add_argument('--root', type=str, required=True)
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--val_batch_size', type=int, default=32)
@@ -72,6 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--shift_lane_dropout_p', type=float, default=0.0)
     parser = HiVT.add_model_specific_args(parser)
     args = parser.parse_args()
+    pl.seed_everything(args.seed)
 
     train_transform = ShiftAugment(
         history_dropout_p=args.shift_history_dropout_p,

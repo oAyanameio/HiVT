@@ -35,6 +35,7 @@ Environment overrides:
   LIMIT_TRAIN_BATCHES=1.0
   LIMIT_VAL_BATCHES=1.0
   MAX_EPOCHS=64
+  SEED=2022
   CKPT_PATH=/path/to/checkpoint.ckpt
   INIT_CKPT_PATH=/path/to/checkpoint.ckpt
   # shift augmentation overrides（仅对 train_reliability_shift 有效）
@@ -199,6 +200,7 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   local limit_train_batches="${LIMIT_TRAIN_BATCHES:-1.0}"
   local limit_val_batches="${LIMIT_VAL_BATCHES:-1.0}"
   local max_epochs="${MAX_EPOCHS:-64}"
+  local seed="${SEED:-2022}"
   local ckpt_path="${CKPT_PATH:-}"
   local init_ckpt_path="${INIT_CKPT_PATH:-}"
   local run_version="${RUN_VERSION:-reliability_$(date +%Y%m%d_%H%M%S)_dim${embed_dim}_gpu${gpu_id}}"
@@ -234,7 +236,7 @@ run_train_reliability() {  local embed_choice="${1:-64}"
   echo "Using GPU $gpu_id for reliability training"
   echo "embed_dim=$embed_dim train_batch_size=$train_batch_size val_batch_size=$val_batch_size num_workers=$num_workers"
   echo "limit_train_batches=$limit_train_batches limit_val_batches=$limit_val_batches"
-  echo "max_epochs=$max_epochs ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
+  echo "max_epochs=$max_epochs seed=$seed ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
   echo "experiment_name=$experiment_name run_version=$run_version"
   echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope freeze_backbone=$freeze_backbone"
   echo "rank_loss_weight=$rank_loss_weight calib_loss_weight=$calib_loss_weight threshold_weight=$mode_risk_threshold_weight_enabled top_k=$mode_risk_rank_top_k"
@@ -247,6 +249,7 @@ run_train_reliability() {  local embed_choice="${1:-64}"
     --val_batch_size "$val_batch_size" \
     --num_workers "$num_workers" \
     --max_epochs "$max_epochs" \
+    --seed "$seed" \
     --limit_train_batches "$limit_train_batches" \
     --limit_val_batches "$limit_val_batches" \
     --experiment_root "$RUNS_ROOT" \
@@ -294,6 +297,7 @@ run_train_reliability_shift() {
   local limit_train_batches="${LIMIT_TRAIN_BATCHES:-1.0}"
   local limit_val_batches="${LIMIT_VAL_BATCHES:-1.0}"
   local max_epochs="${MAX_EPOCHS:-64}"
+  local seed="${SEED:-2022}"
   local ckpt_path="${CKPT_PATH:-}"
   local init_ckpt_path="${INIT_CKPT_PATH:-}"
   local run_version="${RUN_VERSION:-reliability_shift_$(date +%Y%m%d_%H%M%S)_dim${embed_dim}_gpu${gpu_id}}"
@@ -329,7 +333,7 @@ run_train_reliability_shift() {
   echo "Using GPU $gpu_id for reliability+shift training"
   echo "embed_dim=$embed_dim train_batch_size=$train_batch_size run_version=$run_version"
   echo "limit_train_batches=$limit_train_batches limit_val_batches=$limit_val_batches"
-  echo "max_epochs=$max_epochs ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
+  echo "max_epochs=$max_epochs seed=$seed ckpt_path=${ckpt_path:-<none>} init_ckpt_path=${init_ckpt_path:-<none>}"
   echo "mode_target_policy=$mode_target_policy scene_target_policy=$scene_target_policy conflict_scope=$risk_conflict_scope freeze_backbone=$freeze_backbone"
   echo "rank_loss_weight=$rank_loss_weight calib_loss_weight=$calib_loss_weight threshold_weight=$mode_risk_threshold_weight_enabled top_k=$mode_risk_rank_top_k"
 
@@ -341,6 +345,7 @@ run_train_reliability_shift() {
     --val_batch_size "$val_batch_size" \
     --num_workers "$num_workers" \
     --max_epochs "$max_epochs" \
+    --seed "$seed" \
     --limit_train_batches "$limit_train_batches" \
     --limit_val_batches "$limit_val_batches" \
     --experiment_root "$RUNS_ROOT" \
